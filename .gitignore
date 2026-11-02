@@ -1,0 +1,13 @@
+/target/
+
+# Derived from the game's own bytecode: Motion Twin's content, never publish.
+/build/
+*.hlb
+*.pickle
+
+# .NET build output
+bin/
+obj/
+
+__pycache__/
+*.pyc

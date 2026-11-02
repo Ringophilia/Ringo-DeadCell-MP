@@ -1,0 +1,8 @@
+# deadcells.exe is a 32-bit process, so everything that touches it must be too.
+[build]
+target = "i686-pc-windows-gnullvm"
+
+[target.i686-pc-windows-gnullvm]
+linker = "i686-w64-mingw32-clang"
+# Links the unwinder statically, so no libunwind.dll has to ship with the mod.
+rustflags = ["-C", "target-feature=+crt-static"]

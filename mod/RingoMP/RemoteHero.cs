@@ -1,0 +1,143 @@
+using dc;
+using dc.en.hero;
+using dc.pr;
+using dc.tool.atk;
+using HaxeProxy.Runtime;
+using ModCore.Storage;
+using RingoMP.Net;
+
+namespace RingoMP
+{
+    /// Another player's hero, living in this machine's world.
+    public class RemoteHero : Beheaded, IHxbitSerializable<object>
+    {
+        const int DownedLife = 1;
+        const double SnapDriftCells = 3;
+        const double AdjustDriftCells = 0.5;
+
+        public VirtualController Input { get; }
+
+        /// Set in a networked game; takes the damage this hero would have taken.
+        public Action<int>? ReportHit { get; set; }
+
+        public bool Downed { get; private set; }
+
+        public RemoteHero(Game game, VirtualController input) : base(game)
+        {
+            Input = input;
+        }
+
+        public int PreUpdates { get; private set; }
+
+        public int FixedUpdates { get; private set; }
+
+        /// Input advances with the hero's own reads, so a "just pressed" state
+        /// lasts exactly one of them whatever the render rate is.
+        public override void preUpdate()
+        {
+            PreUpdates++;
+            Input.Update();
+            base.preUpdate();
+        }
+
+        public override void fixedUpdate()
+        {
+            FixedUpdates++;
+            base.fixedUpdate();
+        }
+
+        /// Inputs keep this hero's attacks and effects alive between updates; the
+        /// position it reports wins whenever the replay drifts away from it.
+        public void ApplyState(HeroStateData state)
+        {
+            // Between levels this hero stands nowhere.
+            if (_level == null)
+            {
+                return;
+            }
+            Input.HeldMask = state.Held;
+            life = state.Life;
+            dir = state.Dir;
+            var drift = System.Math.Abs(cx + xr - state.Cx - state.Xr) + System.Math.Abs(cy + yr - state.Cy - state.Yr);
+            if (drift > SnapDriftCells)
+            {
+                setPosCase(state.Cx, state.Cy, state.Xr, state.Yr);
+            }
+            else if (drift > AdjustDriftCells)
+            {
+                cx = state.Cx;
+                cy = state.Cy;
+                xr = state.Xr;
+                yr = state.Yr;
+            }
+            dx = state.Dx;
+            dy = state.Dy;
+        }
+
+        /// Life belongs to the player who owns this hero, so a hit taken here is
+        /// reported and undone. The owner's next state brings the true value.
+        public override void applyAttackResult(AttackData a)
+        {
+            var before = life;
+            base.applyAttackResult(a);
+            if (ReportHit != null)
+            {
+                if (life < before)
+                {
+                    ReportHit(before - life);
+                }
+                life = before;
+            }
+        }
+
+        /// Belongs to the session, never to this player's save.
+        public override bool shouldSave() => false;
+
+        /// The game ignores this result and goes by life alone: below 1 it calls onDie.
+        public override bool tryToPreventDeath(AttackData a, double prevLife)
+        {
+            if (ReportHit == null)
+            {
+                GoDown();
+            }
+            return true;
+        }
+
+        public override void kill()
+        {
+            if (ReportHit == null)
+            {
+                GoDown();
+            }
+        }
+
+        /// Death of a remote hero must not reach the game over flow. Its owner decides it.
+        public override void onDie()
+        {
+        }
+
+        public override bool canBeHitBy(Entity by) => !Downed && base.canBeHitBy(by);
+
+        public void GoDown()
+        {
+            Downed = true;
+            life = DownedLife;
+            Input.ReleaseAll();
+            // Mobs keep their first target, so one that is down must drop out of their threat.
+            set_targetable(false);
+        }
+
+        public void Revive(int newLife)
+        {
+            Downed = false;
+            life = newLife;
+            set_targetable(true);
+        }
+
+        object IHxbitSerializable<object>.GetData() => new();
+
+        void IHxbitSerializable<object>.SetData(object data)
+        {
+        }
+    }
+}

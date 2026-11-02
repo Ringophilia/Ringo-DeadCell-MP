@@ -1,0 +1,8 @@
+[package]
+name = "ringo-launcher"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ringo-launcher"
+path = "src/main.rs"

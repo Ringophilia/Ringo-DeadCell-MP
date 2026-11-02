@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ModType>mod</ModType>
+    <ModName>RingoMP</ModName>
+    <Version>0.1.0</Version>
+    <ModVersion>0.1.0</ModVersion>
+    <ModMain>RingoMP.RingoMod</ModMain>
+    <AutoInstallMod>true</AutoInstallMod>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="DeadCellsCoreModding.MDK" Version="1.0.1" />
+    <!-- Ships with DCCM, so it must not be copied into the mod. -->
+    <Reference Include="Steamworks.NET">
+      <HintPath>$(DCCM_MDK_ROOT)\..\host\Steamworks.NET.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
