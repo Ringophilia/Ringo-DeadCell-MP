@@ -37,6 +37,7 @@ namespace RingoMP.Net
         ELobbyType visibility = ELobbyType.k_ELobbyTypeFriendsOnly;
         bool locked;
         bool busy;
+        bool hosting;
         string toldRun = "";
         string toldLevel = "";
 
@@ -47,8 +48,8 @@ namespace RingoMP.Net
         public bool IsPublic => visibility == ELobbyType.k_ELobbyTypePublic;
         public bool Refreshing { get; private set; }
 
-        /// The last thing that went wrong or worth telling, in Chinese and English.
-        public (string Chinese, string English)? Message { get; private set; }
+        /// The last thing that went wrong or is worth telling.
+        public Phrase? Message { get; private set; }
 
         public SteamLobby(ILogger log, NetSession net)
         {
@@ -60,7 +61,7 @@ namespace RingoMP.Net
             created = CallResult<LobbyCreated_t>.Create(OnCreated);
             entered = CallResult<LobbyEnter_t>.Create(OnEntered);
             listed = CallResult<LobbyMatchList_t>.Create(OnListed);
-            net.Refused = (chinese, english) => Message = (chinese, english);
+            net.Refused = phrase => Message = phrase;
             net.KickedOut = OnKicked;
             ReadLaunchArguments();
         }
@@ -94,8 +95,36 @@ namespace RingoMP.Net
             }
             if (InRoom && IsOwner)
             {
+                TakeOver();
                 PublishState();
             }
+        }
+
+        /// Steam hands a room to the one left in it when its owner's game is gone.
+        /// The session went on alone by then, and now waits here for the owner to come back.
+        void TakeOver()
+        {
+            if (hosting)
+            {
+                return;
+            }
+            // Only a host that left its room hands it on, so there is no waiting for it.
+            if (net.Role == NetRole.Client)
+            {
+                net.HostLeft();
+            }
+            log.Information("RINGO this player now owns room {id}", lobby.m_SteamID);
+            Open();
+        }
+
+        /// What a room's owner keeps up: its name, the way in, and the link to listen on.
+        void Open()
+        {
+            hosting = true;
+            SteamMatchmaking.SetLobbyData(lobby, MarkKey, MarkValue);
+            SteamMatchmaking.SetLobbyData(lobby, NameKey, $"{SteamFriends.GetPersonaName()}");
+            SteamFriends.SetRichPresence(ConnectKey, $"{ConnectArgument} {lobby.m_SteamID}");
+            net.Attach(SteamTransport.HostP2P(log, MayConnect), NetRole.Host);
         }
 
         void PublishState()
@@ -129,15 +158,12 @@ namespace RingoMP.Net
             if (failed || result.m_eResult != EResult.k_EResultOK)
             {
                 log.Warning("RINGO no room: {r}", result.m_eResult);
-                Message = ("创建房间失败", "Could not create a room");
+                Message = Phrase.CreateRoomFailed;
                 return;
             }
             lobby = new CSteamID(result.m_ulSteamIDLobby);
             log.Information("RINGO room {id} is open", lobby.m_SteamID);
-            SteamMatchmaking.SetLobbyData(lobby, MarkKey, MarkValue);
-            SteamMatchmaking.SetLobbyData(lobby, NameKey, $"{SteamFriends.GetPersonaName()}");
-            SteamFriends.SetRichPresence(ConnectKey, $"{ConnectArgument} {lobby.m_SteamID}");
-            net.Attach(SteamTransport.HostP2P(log, MayConnect), NetRole.Host);
+            Open();
         }
 
         public void Refresh()
@@ -224,10 +250,11 @@ namespace RingoMP.Net
             if (failed || result.m_EChatRoomEnterResponse != (uint)EChatRoomEnterResponse.k_EChatRoomEnterResponseSuccess)
             {
                 log.Warning("RINGO could not enter the room: {r}", result.m_EChatRoomEnterResponse);
-                Message = ("无法加入：房间已满、已锁定或已关闭", "Could not join: the room is full, locked or closed");
+                Message = Phrase.JoinRoomFailed;
                 return;
             }
             lobby = new CSteamID(result.m_ulSteamIDLobby);
+            hosting = false;
             net.Attach(SteamTransport.JoinP2P(log, SteamMatchmaking.GetLobbyOwner(lobby)), NetRole.Client);
         }
 
@@ -304,7 +331,7 @@ namespace RingoMP.Net
         void OnKicked()
         {
             Close();
-            Message = ("你已被房主移出房间", "The host removed you from the room");
+            Message = Phrase.RemovedFromRoom;
         }
 
         void Close()
@@ -312,6 +339,7 @@ namespace RingoMP.Net
             SteamMatchmaking.LeaveLobby(lobby);
             SteamFriends.SetRichPresence(ConnectKey, null);
             lobby = CSteamID.Nil;
+            hosting = false;
             locked = false;
             kicked.Clear();
             toldRun = "";

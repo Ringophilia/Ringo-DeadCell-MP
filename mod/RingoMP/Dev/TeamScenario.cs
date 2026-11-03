@@ -29,6 +29,8 @@ namespace RingoMP.Dev
         {
             Arrived();
             Log.Information("RINGO {role} first mob life={l} shared items={s}", RoleName, Net.Registry!.Mobs[0].life, Net.Items.SharedCount);
+            yield return Expect("the partner said who they are", () => Net.Look.PartnerName != null);
+            yield return Expect("the partner's name shows above their hero", () => Remote.gameplayLabel?.parent != null);
             foreach (var step in TakeAnItem().Concat(Rescue()).Concat(NextLevelReturn()).Concat(Wipe()))
             {
                 yield return step;
@@ -71,7 +73,9 @@ namespace RingoMP.Dev
             {
                 Life.GoDown();
                 Check("the client is down", Life.Local == DownState.Rescuable);
+                yield return Expect("the camera follows the partner", () => ReferenceEquals(CurrentGame.curLevel.viewport.tracked, Remote));
                 yield return Expect("the client stood up", () => Life.Local == DownState.Standing, 20);
+                yield return Expect("the camera is back on the client's hero", () => ReferenceEquals(CurrentGame.curLevel.viewport.tracked, Main));
                 Check("standing up gives half the life back", Main.life == Main.maxLife / 2);
                 yield break;
             }

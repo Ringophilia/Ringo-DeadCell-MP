@@ -96,7 +96,7 @@ namespace RingoMP.Net
             hero.lockControlsS(LockSeconds);
             hero.set_targetable(false);
             hero.spr.alpha = DownedAlpha;
-            Notice.Say("你倒下了，等待队友救援", "You are down. Wait for your partner");
+            Notice.Say(Phrase.YouAreDown);
             if (Peer != DownState.Standing)
             {
                 Wipe();
@@ -156,7 +156,7 @@ namespace RingoMP.Net
             else if (wasStanding)
             {
                 coop.Remote?.GoDown();
-                Notice.Say("队友倒下了，靠近并按住交互键救援", "Your partner is down. Hold interact next to them");
+                Notice.Say(Phrase.PartnerDown);
                 if (Local != DownState.Standing)
                 {
                     Wipe();
@@ -169,7 +169,7 @@ namespace RingoMP.Net
             if (Local == DownState.Rescuable)
             {
                 StandUp();
-                Notice.Say("队友把你救起来了", "Your partner got you up");
+                Notice.Say(Phrase.PartnerRescuedYou);
             }
         }
 
@@ -191,7 +191,7 @@ namespace RingoMP.Net
                 if (downTimer >= RescueWindowSeconds)
                 {
                     Local = DownState.WaitingForNextLevel;
-                    Notice.Say("救援时间已过，下一关复活", "Too late for rescue. You return in the next level");
+                    Notice.Say(Phrase.RescueTooLate);
                 }
             }
             UpdateRescue(dt);

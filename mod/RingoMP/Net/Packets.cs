@@ -22,6 +22,8 @@ namespace RingoMP.Net
         LoadoutBack,
         Bye,
         Kicked,
+        Look,
+        LevelContents,
     }
 
     /// One hero's state, sent 30 times a second by the player who owns it.

@@ -4,6 +4,7 @@ using dc.pr;
 using dc.tool.atk;
 using HaxeProxy.Runtime;
 using ModCore.Storage;
+using ModCore.Utilities;
 using RingoMP.Net;
 
 namespace RingoMP
@@ -22,6 +23,10 @@ namespace RingoMP
 
         public bool Downed { get; private set; }
 
+        /// What the partner wears, where this game has it. The game draws a hero in
+        /// what the local save says, so that is swapped while this hero is drawn.
+        public (string? Skin, string? Head)? Outfit { get; set; }
+
         public RemoteHero(Game game, VirtualController input) : base(game)
         {
             Input = input;
@@ -37,13 +42,52 @@ namespace RingoMP
         {
             PreUpdates++;
             Input.Update();
-            base.preUpdate();
+            Dressed(base.preUpdate);
         }
 
         public override void fixedUpdate()
         {
             FixedUpdates++;
-            base.fixedUpdate();
+            Dressed(base.fixedUpdate);
+        }
+
+        public override void postUpdate() => Dressed(base.postUpdate);
+
+        public override void initGfx() => Dressed(base.initGfx);
+
+        /// Builds this hero's graphics again in its outfit.
+        public void Redress() => Dressed(() =>
+        {
+            disposeGfx();
+            initGfx();
+        });
+
+        void Dressed(Action body)
+        {
+            var user = Game.Class.ME?.user;
+            if (Outfit is not { } outfit || user == null)
+            {
+                body();
+                return;
+            }
+            var (skin, head) = (user.heroSkin, user.heroHeadSkin);
+            if (outfit.Skin != null)
+            {
+                user.heroSkin = outfit.Skin.AsHaxeString();
+            }
+            if (outfit.Head != null)
+            {
+                user.heroHeadSkin = outfit.Head.AsHaxeString();
+            }
+            try
+            {
+                body();
+            }
+            finally
+            {
+                user.heroSkin = skin;
+                user.heroHeadSkin = head;
+            }
         }
 
         /// Inputs keep this hero's attacks and effects alive between updates; the

@@ -69,7 +69,7 @@ namespace RingoMP.Net
                 localExit = self;
                 localFlag = flag;
                 SendDoor();
-                Notice.Say("等待队友进门，再按一次取消", "Waiting for your partner. Press again to cancel");
+                Notice.Say(Phrase.DoorWaiting);
             }
         }
 
@@ -82,7 +82,7 @@ namespace RingoMP.Net
             }
             localExit = null;
             SendDoor();
-            Notice.Say("已取消进门", "Cancelled");
+            Notice.Say(Phrase.DoorCancelled);
         }
 
         void SendDoor()
@@ -162,11 +162,11 @@ namespace RingoMP.Net
             PeerWaits++;
             if (localExit == null || LocalDoor == next)
             {
-                Notice.Say("队友已在门口等待", "Your partner is at the door");
+                Notice.Say(Phrase.DoorPartnerHere);
             }
             else
             {
-                Notice.Say("队友在另一扇门等待", "Your partner is at another door");
+                Notice.Say(Phrase.DoorPartnerElsewhere);
             }
         }
 

@@ -60,9 +60,9 @@ namespace RingoMP
                     return orig(self, label, callback, help, enabled, position);
                 }
                 menuEntries = 1;
-                var entry = orig(self, T("单人游戏", "Single player").AsHaxeString(), callback, help, enabled, position);
-                orig(self, T("多人游戏", "Multiplayer").AsHaxeString(), new HlAction(Open),
-                    T("创建或加入房间，和朋友一起玩", "Create or join a room and play with a friend").AsHaxeString(), enabled, position);
+                var entry = orig(self, Translations.Get(Phrase.MenuSinglePlayer).AsHaxeString(), callback, help, enabled, position);
+                orig(self, Translations.Get(Phrase.MenuMultiplayer).AsHaxeString(), new HlAction(Open),
+                    Translations.Get(Phrase.MenuMultiplayerHelp).AsHaxeString(), enabled, position);
                 log.Information("RINGO title menu has its multiplayer entry");
                 return entry;
             };
@@ -86,9 +86,6 @@ namespace RingoMP
                 orig(self);
             }
         }
-
-        static string T(string chinese, string english) =>
-            Lang.Class.LANG?.ToString().StartsWith("zh") == true ? chinese : english;
 
         /// Tests open it, as nobody can press a key in a game on a hidden desktop.
         public void Open()
@@ -190,13 +187,13 @@ namespace RingoMP
             }
             if (net.Connected)
             {
-                return T("已连接", "Connected");
+                return Translations.Get(Phrase.StateConnected);
             }
             if (net.LinkDown)
             {
-                return T("连接中断，正在重连…", "Link lost, reconnecting…");
+                return Translations.Get(Phrase.StateReconnecting);
             }
-            return lobby.IsOwner ? T("等待玩家加入", "Waiting for a player") : T("正在连接房主…", "Connecting to the host…");
+            return Translations.Get(lobby.IsOwner ? Phrase.StateWaitingForPlayer : Phrase.StateConnecting);
         }
 
         string StartHint()
@@ -207,60 +204,59 @@ namespace RingoMP
             }
             if (net.InRun)
             {
-                return T($"当前关卡：{net.LevelId}", $"Level: {net.LevelId}");
+                return Translations.Get(Phrase.HintLevel, net.LevelId ?? "");
             }
-            return lobby.IsOwner
-                ? T("队友已就绪，可以开始游戏", "Your partner is ready, you can start")
-                : T("等待房主开始游戏", "Waiting for the host to start");
+            return Translations.Get(lobby.IsOwner ? Phrase.HintPartnerReady : Phrase.HintWaitingForHost);
         }
 
         IEnumerable<string> RoomLines()
         {
-            yield return T("联机房间", "Co-op room");
+            yield return Translations.Get(Phrase.PanelRoom);
             yield return LinkState();
             yield return "";
             foreach (var (name, owner, _) in lobby.Members())
             {
-                yield return owner ? T($"  {name}（房主）", $"  {name} (host)") : $"  {name}";
+                var shown = Translations.Drawable(name);
+                yield return "  " + (owner ? Translations.Get(Phrase.MemberHost, shown) : shown);
             }
             yield return "";
             yield return StartHint();
             yield return "";
             if (lobby.IsOwner)
             {
-                yield return T(lobby.Locked ? "房间：已锁定" : "房间：开放", lobby.Locked ? "Room: locked" : "Room: open")
-                    + "    " + T(lobby.IsPublic ? "所有人可见" : "仅好友可见", lobby.IsPublic ? "public" : "friends only");
+                yield return Translations.Get(lobby.Locked ? Phrase.RoomLocked : Phrase.RoomOpen)
+                    + "    " + Translations.Get(lobby.IsPublic ? Phrase.VisibilityPublic : Phrase.VisibilityFriends);
                 if (AtTitle)
                 {
-                    yield return T("[S] 开始新游戏  [C] 继续存档", "[S] New run  [C] Continue save");
+                    yield return Translations.Get(Phrase.KeysStart);
                 }
-                yield return T("[I] 邀请好友  [K] 移出玩家  [L] 锁定/解锁", "[I] Invite  [K] Remove player  [L] Lock/unlock");
-                yield return T("[P] 切换可见范围  [X] 关闭房间  [Esc] 返回", "[P] Visibility  [X] Close room  [Esc] Back");
+                yield return Translations.Get(Phrase.KeysOwner);
+                yield return Translations.Get(Phrase.KeysOwnerMore);
             }
             else
             {
-                yield return T("[I] 邀请好友  [X] 退出房间  [Esc] 返回", "[I] Invite  [X] Leave room  [Esc] Back");
+                yield return Translations.Get(Phrase.KeysMember);
             }
         }
 
         IEnumerable<string> ListLines()
         {
-            yield return T("联机房间列表", "Co-op rooms");
-            yield return lobby.Refreshing ? T("正在刷新…", "Refreshing…") : "";
+            yield return Translations.Get(Phrase.PanelRooms);
+            yield return lobby.Refreshing ? Translations.Get(Phrase.ListRefreshing) : "";
             var rooms = lobby.Rooms;
             if (rooms.Count == 0 && !lobby.Refreshing)
             {
-                yield return T("  没有找到房间", "  No rooms found");
+                yield return "  " + Translations.Get(Phrase.ListEmpty);
             }
             for (var i = 0; i < System.Math.Min(rooms.Count, ListedRooms); i++)
             {
                 var room = rooms[i];
-                var state = room.InRun ? T($"游戏中 {room.Level}", $"playing {room.Level}") : T("等待中", "waiting");
-                yield return $"  [{i + 1}] {room.Name}  {room.Members}/{room.Capacity}  {state}";
+                var state = room.InRun ? Translations.Get(Phrase.ListPlaying, room.Level) : Translations.Get(Phrase.ListWaiting);
+                yield return $"  [{i + 1}] {Translations.Drawable(room.Name)}  {room.Members}/{room.Capacity}  {state}";
             }
             yield return "";
-            yield return T(lobby.IsPublic ? "新房间：所有人可见" : "新房间：仅好友可见", lobby.IsPublic ? "New rooms: public" : "New rooms: friends only");
-            yield return T("[N] 新建房间  [R] 刷新  [P] 切换可见范围  [Esc] 返回", "[N] New room  [R] Refresh  [P] Visibility  [Esc] Back");
+            yield return Translations.Get(lobby.IsPublic ? Phrase.NewRoomsPublic : Phrase.NewRoomsFriends);
+            yield return Translations.Get(Phrase.KeysList);
         }
 
         string Content()
@@ -268,9 +264,9 @@ namespace RingoMP
             var lines = (lobby.InRoom ? RoomLines() : ListLines()).ToList();
             if (lobby.Message is { } message)
             {
-                lines.Add(T(message.Chinese, message.English));
+                lines.Add(Translations.Get(message));
             }
-            return string.Join('\n', lines);
+            return string.Join("\n", lines);
         }
 
         void Build()

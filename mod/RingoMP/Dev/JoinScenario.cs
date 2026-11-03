@@ -25,6 +25,8 @@ namespace RingoMP.Dev
         const string ReturningItem = "StartBow";
 
         readonly bool secondTime = Environment.GetEnvironmentVariable("RINGO_SECOND_LIFE") == "1";
+        dc.en.Mob? aloneLife;
+        int aloneMaxLife;
 
         // Nobody is connected yet when the host starts, and the client is taken along.
         protected override bool CanStart => !IsClient;
@@ -45,6 +47,8 @@ namespace RingoMP.Dev
             yield return Seconds(1);
 
             var mob = Net.Registry!.Mobs.First(m => !m.destroyed && m.life > 0);
+            aloneLife = Net.Registry.Mobs.Last(m => !m.destroyed && m.life > 0);
+            aloneMaxLife = aloneLife.maxLife;
             Net.Registry.TryGetIndex(mob, out var index);
             Log.Information("RINGO Host kills mob {i} {type}", index, mob.GetType().Name);
             mob.life = 0;
@@ -56,6 +60,8 @@ namespace RingoMP.Dev
             Arrived();
             yield return Seconds(SyncSeconds);
             Check("hero state flows", Net.HeroPackets > 0);
+            Log.Information("RINGO Host a mob made for one went from {a} to {b} life", aloneMaxLife, aloneLife!.maxLife);
+            Check("mobs made for one player got stronger for two", aloneLife.maxLife > aloneMaxLife);
             if (secondTime)
             {
                 yield break;

@@ -114,6 +114,10 @@ namespace RingoMP
         {
             if (roomTest != null && Main.Class.ME?.curProcess is TitleScreen)
             {
+                if (roomTest == "languages")
+                {
+                    LanguageProbe.Report(Logger);
+                }
                 panel!.Open();
                 if (roomTest == "host")
                 {
