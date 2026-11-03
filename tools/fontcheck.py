@@ -47,11 +47,12 @@ def chars(data):
         i += 22
     return found
 
+# Menus draw in the larger sizes, notices in the smaller ones: a letter must be in all of them.
 fonts = {}
 for charset in ["latin", "japanese", "korean", "cyrillic", "schinese", "tchinese"]:
-    candidates = [p for p in files if p.endswith(f"{charset}_18.fnt")]
-    fonts[charset] = chars(read(candidates[0]))
-    print(charset, candidates[0], len(fonts[charset]), "chars")
+    sizes = sorted(p for p in files if re.fullmatch(rf"fonts/exported/{charset}_\d+\.fnt", p))
+    fonts[charset] = set.intersection(*(chars(read(size)) for size in sizes))
+    print(charset, ", ".join(sizes), len(fonts[charset]), "chars in all")
 
 languages = ["en", "de", "es", "fr", "it", "ja", "ko", "pl", "pt", "ru", "tr", "zh", "zh-tw"]
 charset_of = {"ja": "japanese", "ko": "korean", "ru": "cyrillic", "zh": "schinese", "zh-tw": "tchinese"}

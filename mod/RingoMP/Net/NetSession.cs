@@ -29,7 +29,7 @@ namespace RingoMP.Net
         readonly ILogger log;
         readonly Dictionary<Mob, bool> dead = new(ReferenceEqualityComparer.Instance);
         readonly Dictionary<ushort, string> lastAnims = [];
-        readonly Dictionary<byte, ulong> peerSignatures = [];
+        readonly Dictionary<(byte Number, byte Room), ulong> peerSignatures = [];
         readonly Dictionary<byte, string> runLevels = [];
         readonly Dictionary<byte, string> peerLevels = [];
         readonly HashSet<Mob> scaledMobs = new(ReferenceEqualityComparer.Instance);
@@ -38,10 +38,17 @@ namespace RingoMP.Net
         bool routeFound;
         double heroTimer;
         double mobTimer;
-        (byte Number, string Id)? peerArrival;
+        (byte Number, byte Room, string Id)? peerArrival;
         Level? trackedLevel;
         Game? runGame;
         byte levelNumber;
+        // Side rooms (the bank, challenge rooms and the like) are levels of their own
+        // within a level. The main one is room 0, and the others keep their mobs while
+        // the players are out, as the game keeps the rooms themselves.
+        byte room;
+        Level? roomsMain;
+        readonly HashSet<Level> roomsSeen = new(ReferenceEqualityComparer.Instance);
+        readonly Dictionary<Level, MobRegistry> roomRegistries = new(ReferenceEqualityComparer.Instance);
         int runsStarted;
         bool signatureSent;
         bool allowDeath;
@@ -85,7 +92,11 @@ namespace RingoMP.Net
         public ITransport Transport => transport;
         public int? Seed { get; private set; }
         public MobRegistry? Registry { get; private set; }
-        public bool LevelsMatch => Registry != null && peerSignatures.TryGetValue(levelNumber, out var peer) && peer == Registry.Signature;
+        public bool LevelsMatch => Registry != null && peerArrival is { } arrival && arrival.Number == levelNumber && arrival.Room == room
+            && peerSignatures.TryGetValue((levelNumber, room), out var peer) && peer == Registry.Signature;
+
+        /// In a side room rather than the level itself, for tests to follow along.
+        public bool InSideRoom => room != 0;
         public bool Connected => transport.Connected;
         public bool InRun => Game.Class.ME?.hero != null;
         public string? LevelId => Game.Class.ME is { curLevel: not null } game ? CurrentLevelId(game) : null;
@@ -355,7 +366,7 @@ namespace RingoMP.Net
             seedTold = null;
             runTold = null;
             signatureSent = false;
-            peerSignatures.Remove(levelNumber);
+            peerSignatures.Remove((levelNumber, room));
             Progress.NewLink();
             Look.NewLink();
             if (coop.Remote is { } remote)
@@ -386,7 +397,7 @@ namespace RingoMP.Net
             seedTold = null;
             runTold = null;
             signatureSent = false;
-            peerSignatures.Remove(levelNumber);
+            peerSignatures.Remove((levelNumber, room));
             Progress.NewLink();
             Look.NewLink();
             if (fresh && savedLoadout != null && savedLoadoutOwner == peerId)
@@ -434,6 +445,7 @@ namespace RingoMP.Net
         byte[] LevelPacket(PacketType type, Action<BinaryWriter> body) => Packet.Build(type, w =>
         {
             w.Write(levelNumber);
+            w.Write(room);
             body(w);
         });
 
@@ -505,8 +517,8 @@ namespace RingoMP.Net
         /// no other game can rebuild. The players meet in the next one instead.
         void TellWaiting()
         {
-            if (!saidWaiting && Role == NetRole.Client && peerArrival is { } arrival && arrival.Number == levelNumber
-                && peerSignatures.ContainsKey(levelNumber) && Registry != null && !LevelsMatch)
+            if (!saidWaiting && Role == NetRole.Client && peerArrival is { } arrival && arrival.Number == levelNumber && arrival.Room == room
+                && peerSignatures.ContainsKey((levelNumber, room)) && Registry != null && !LevelsMatch)
             {
                 saidWaiting = true;
                 Notice.Say(Phrase.MeetInNextLevel);
@@ -527,11 +539,25 @@ namespace RingoMP.Net
         void TrackLevel()
         {
             var level = Game.Class.ME?.curLevel;
-            if (level == null || ReferenceEquals(level, trackedLevel))
+            if (level == null)
             {
                 return;
             }
+            if (ReferenceEquals(level, trackedLevel))
+            {
+                // A new level comes with rooms of its own, so the ones known are this level's.
+                if (ReferenceEquals(Game.Class.ME, trackedGame))
+                {
+                    RememberRooms(Game.Class.ME, level);
+                }
+                return;
+            }
             var game = Game.Class.ME;
+            if (ReferenceEquals(game, trackedGame) && IsSideRoomMove(game, level))
+            {
+                EnterRoom(game, level);
+                return;
+            }
             if (!ReferenceEquals(game, trackedGame))
             {
                 // Someone joining heard the host's way before their first level.
@@ -550,6 +576,11 @@ namespace RingoMP.Net
             }
             trackedLevel = level;
             levelNumber++;
+            room = 0;
+            roomsMain = level;
+            roomsSeen.Clear();
+            roomRegistries.Clear();
+            RememberRooms(game, level);
             runLevels[levelNumber] = CurrentLevelId(game);
             contentsSent = false;
             scaledMobs.RemoveWhere(m => m.destroyed);
@@ -562,14 +593,76 @@ namespace RingoMP.Net
             Items.Clear();
             Life.OnNewLevel();
             Registry = new MobRegistry(level);
+            roomRegistries[level] = Registry;
             log.Information("RINGO level {l} registered {n} mobs signature {s:x}", levelNumber, Registry.Mobs.Count, Registry.Signature);
+            LockPuppets();
+        }
+
+        void LockPuppets()
+        {
             if (Role == NetRole.Client)
             {
-                foreach (var mob in Registry.Mobs)
+                foreach (var mob in Registry!.Mobs)
                 {
                     mob.lockAiS(PuppetAiLockSeconds);
                 }
             }
+        }
+
+        /// The game builds a level's side rooms along with it and switches between them.
+        void RememberRooms(Game game, Level level)
+        {
+            roomsSeen.Add(level);
+            var rooms = game.subLevels;
+            for (var i = 0; rooms != null && i < rooms.length; i++)
+            {
+                if (rooms.getDyn(i) is Level other)
+                {
+                    roomsSeen.Add(other);
+                }
+            }
+        }
+
+        bool IsSideRoomMove(Game game, Level level) => trackedLevel != null && roomsSeen.Contains(level);
+
+        /// Into a side room or back out of it: the same level number, the room's own
+        /// mobs, and nothing that only a new level brings.
+        void EnterRoom(Game game, Level level)
+        {
+            trackedLevel = level;
+            room = ReferenceEquals(level, roomsMain) ? (byte)0 : (byte)(RoomIndex(game, level) + 1);
+            contentsSent = false;
+            signatureSent = false;
+            itemsTracked = false;
+            saidWaiting = false;
+            lastAnims.Clear();
+            Gathering.Reset();
+            Items.Clear();
+            if (roomRegistries.TryGetValue(level, out var registry))
+            {
+                Registry = registry;
+            }
+            else
+            {
+                Registry = new MobRegistry(level);
+                roomRegistries[level] = Registry;
+                LockPuppets();
+            }
+            log.Information("RINGO level {l} room {r} {id}: {n} mobs signature {s:x}",
+                levelNumber, room, CurrentLevelId(game), Registry.Mobs.Count, Registry.Signature);
+        }
+
+        static int RoomIndex(Game game, Level level)
+        {
+            var rooms = game.subLevels;
+            for (var i = 0; rooms != null && i < rooms.length; i++)
+            {
+                if (ReferenceEquals(rooms.getDyn(i), level))
+                {
+                    return i;
+                }
+            }
+            return byte.MaxValue - 1;
         }
 
         /// The levels a run went through before this one, as its save keeps them for the world map.
@@ -634,8 +727,8 @@ namespace RingoMP.Net
         void OfferContents()
         {
             if (Role != NetRole.Host || contentsSent || Registry == null || Game.Class.ME is not { } game
-                || peerArrival is not { } arrival || arrival.Number != levelNumber || arrival.Id != CurrentLevelId(game)
-                || !peerSignatures.ContainsKey(levelNumber) || LevelsMatch)
+                || peerArrival is not { } arrival || arrival.Number != levelNumber || arrival.Room != room || arrival.Id != CurrentLevelId(game)
+                || !peerSignatures.ContainsKey((levelNumber, room)) || LevelsMatch)
             {
                 return;
             }
@@ -671,10 +764,8 @@ namespace RingoMP.Net
             // What lay around is tracked again, so what was just taken out does not count as taken.
             Items.Clear();
             Registry = new MobRegistry(level, skipGone: true);
-            foreach (var mob in Registry.Mobs)
-            {
-                mob.lockAiS(PuppetAiLockSeconds);
-            }
+            roomRegistries[level] = Registry;
+            LockPuppets();
             itemsTracked = false;
             signatureSent = false;
             saidWaiting = false;
@@ -736,22 +827,33 @@ namespace RingoMP.Net
             }
             FindRoute(game);
             var ahead = (sbyte)(arrival.Number - levelNumber) > 0;
-            var elsewhere = Role == NetRole.Client && arrival.Number == levelNumber && arrival.Id != CurrentLevelId(game);
+            // Side rooms are entered together through their doors. A partner in one
+            // comes back out of it; nobody follows them in.
+            var elsewhere = Role == NetRole.Client && arrival.Number == levelNumber && arrival.Room == 0 && room == 0
+                && arrival.Id != CurrentLevelId(game);
             if (!ahead && !elsewhere)
             {
                 return;
             }
             // A level's content depends on the way there, so the way is walked level by level.
-            var next = (byte)(levelNumber + 1);
-            if (ahead && peerLevels.TryGetValue(next, out var id))
+            var known = peerLevels.Keys.Where(n => (sbyte)(n - levelNumber) > 0).OrderBy(n => (sbyte)(n - levelNumber)).ToList();
+            byte next;
+            string id;
+            if (ahead && known.Count > 0)
             {
+                next = known[0];
+                id = peerLevels[next];
                 log.Information("RINGO following the other player's way, {id} of {last}", id, arrival.Id);
             }
-            else
+            else if (arrival.Room == 0)
             {
                 id = arrival.Id;
                 next = arrival.Number;
                 log.Information("RINGO following the other player to {id}", id);
+            }
+            else
+            {
+                return;
             }
             Gathering.InTransit = true;
             levelNumber = (byte)(next - 1);
@@ -915,24 +1017,26 @@ namespace RingoMP.Net
                     continue;
                 }
                 var number = reader.ReadByte();
+                var peerRoom = reader.ReadByte();
                 // The other game may announce a level this one has not reached yet.
                 if (type == PacketType.LevelReady)
                 {
-                    peerSignatures[number] = reader.ReadUInt64();
-                    peerArrival = (number, reader.ReadString());
+                    peerSignatures[(number, peerRoom)] = reader.ReadUInt64();
+                    peerArrival = (number, peerRoom, reader.ReadString());
                     for (var left = reader.ReadInt32(); left > 0; left--)
                     {
                         peerLevels[reader.ReadByte()] = reader.ReadString();
                     }
-                    log.Information("RINGO peer level {l} {id} signature {s:x}, match={m}", number, peerArrival.Value.Id, peerSignatures[number], LevelsMatch);
+                    log.Information("RINGO peer level {l} room {r} {id} signature {s:x}, match={m}",
+                        number, peerRoom, peerArrival.Value.Id, peerSignatures[(number, peerRoom)], LevelsMatch);
                     // Deaths name mobs by their place in the list, which must be the same list.
-                    if (number == levelNumber && LevelsMatch)
+                    if (number == levelNumber && peerRoom == room && LevelsMatch)
                     {
                         ReplayLevel();
                     }
                     continue;
                 }
-                if (number != levelNumber)
+                if (number != levelNumber || peerRoom != room)
                 {
                     continue;
                 }

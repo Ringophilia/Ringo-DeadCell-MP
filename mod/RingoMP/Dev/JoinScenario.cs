@@ -13,7 +13,8 @@ namespace RingoMP.Dev
     /// kills a mob and takes an item, and only then does the client connect
     /// (tools\join.ps1 starts it later). It must end up in the same level, in step,
     /// with the mob gone and the item lying there. The client then picks up gear and
-    /// crashes; as RINGO_SECOND_LIFE=1 it starts anew and must get that gear back.
+    /// crashes; as RINGO_SECOND_LIFE=1 it starts anew and must get that gear back,
+    /// affixes and all.
     public sealed class JoinScenario(CoopSession session, NetSession net, ILogger log, string name) : ScriptScenario(session, net, log, name)
     {
         const double JoinWaitSeconds = 120;
@@ -23,6 +24,7 @@ namespace RingoMP.Dev
         const int DropOffsetCells = 2;
         const string GearItem = "StartSword";
         const string ReturningItem = "StartBow";
+        const int ReturningAffixes = 2;
 
         readonly bool secondTime = Environment.GetEnvironmentVariable("RINGO_SECOND_LIFE") == "1";
         dc.en.Mob? aloneLife;
@@ -79,6 +81,44 @@ namespace RingoMP.Dev
             new ItemDrop(CurrentGame.curLevel, Main.cx + DropOffsetCells, Main.cy, item, false, Ref<bool>.Null).init();
         }
 
+        InventItem? Returning()
+        {
+            var items = Main.inventory.items;
+            for (var i = 0; i < items.length; i++)
+            {
+                if (items.getDyn(i) is InventItem item && $"{((dynamic)item.kind).Param0}" == ReturningItem)
+                {
+                    return item;
+                }
+            }
+            return null;
+        }
+
+        static IEnumerable<string> Names(dc.hl.types.ArrayObj names)
+        {
+            for (var i = 0; i < names.length; i++)
+            {
+                yield return names.getDyn(i).ToString()!;
+            }
+        }
+
+        /// The same in both lives: the first affixes in the game's list this item can take.
+        static List<string> AffixesFor(InventItem? item)
+        {
+            var found = new List<string>();
+            var all = (dc.hl.types.ArrayDyn)((dynamic)dc.Data.Class.affix).all;
+            var count = all.get_length();
+            for (var i = 0; i < count && item != null && found.Count < ReturningAffixes; i++)
+            {
+                var id = ((dynamic)all.getDyn(i)).id.ToString();
+                if (item.canReceiveAffix(((string)id).AsHaxeString()))
+                {
+                    found.Add(id);
+                }
+            }
+            return found;
+        }
+
         IEnumerable<Func<bool>> ClientRun()
         {
             Log.Information("RINGO Client in {id}, seed {s}", CurrentGame.curLevel.map.infos.id.ToString(), Net.Seed);
@@ -94,10 +134,25 @@ namespace RingoMP.Dev
             if (secondTime)
             {
                 Check("the gear came back", Main.inventory.hasItem(ReturningItem.AsHaxeString()));
+                var back = Returning();
+                var expected = AffixesFor(back);
+                var had = back == null ? "none" : string.Join(",", Names(back.affixes));
+                Log.Information("RINGO Client gear came back with affixes {a}, expected {e}", had, string.Join(",", expected));
+                Check("the gear kept its affixes", back != null && expected.Count > 0 && expected.All(a => back.hasAffix(a.AsHaxeString())));
                 yield break;
             }
             CoopSession.Give(Main, ReturningItem);
             yield return Seconds(1);
+            if (Returning() is { } bow)
+            {
+                bow.clearAffixes();
+                foreach (var affix in AffixesFor(bow))
+                {
+                    var force = true;
+                    bow.addAffix(affix.AsHaxeString(), ref force);
+                }
+                Log.Information("RINGO Client gave the gear affixes {a}", string.Join(",", Names(bow.affixes)));
+            }
             Log.Information("RINGO Client carrying {n} items, crashing", Main.inventory.items.length);
             Net.SaveLoadoutNow();
             yield return Seconds(1);

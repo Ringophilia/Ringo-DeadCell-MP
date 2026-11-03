@@ -42,7 +42,7 @@ An open-source co-op mod written from scratch on top of [Dead Cells Core Modding
 
 1. Dead Cells for PC on Steam, tested on v35.
 2. [Dead Cells Core Modding](https://github.com/dead-cells-core-modding/core) (DCCM), tested on 35.14.2.
-3. `RingoMP-v0.2.0.zip` from [Releases](https://github.com/Ringophilia/Ringo-DeadCell-MP/releases).
+3. `RingoMP-v0.3.0.zip` from [Releases](https://github.com/Ringophilia/Ringo-DeadCell-MP/releases).
 4. Unzip it and put the `RingoMP` folder into `coremod\mods\` inside the game folder:
 
 ```text
@@ -69,21 +69,10 @@ Something not working? See [Troubleshooting](docs/TROUBLESHOOTING.md).
 ## How to play
 
 1. Choose **Multiplayer** in the main menu to open the lobby.
-2. Press **`N`** to create a room, then **`I`** to invite a friend, or press a number to join a listed room.
-3. Once your friend is in, the host presses **`S`** for a new run or **`C`** to continue a save, and the friend follows automatically.
+2. Choose **Create a room**, then **Invite a friend**, or choose a room in the list to join it.
+3. Once your friend is in, the host chooses **Start a new run** or **Continue the saved run**, and the friend follows automatically.
 
-| Key | Room list | In a room |
-|---|---|---|
-| `N` / `R` | Create a room / refresh | |
-| `1`–`9` | Join that room | |
-| `S` / `C` | | New run / continue save (host) |
-| `I` | | Invite a friend |
-| `K` | | Remove the player (host) |
-| `L` | | Lock or unlock (host) |
-| `P` | Visibility of new rooms | Visibility (host) |
-| `X` | | Close the room (host) / leave |
-| `Esc` | Back | Back |
-| `F5` | Open or hide the lobby at any time, also during a run | |
+The lobby is a menu like the game's options: click with the mouse, or move with the keys or a gamepad and confirm as in any other menu. During a run, the pause menu has a **Multiplayer** entry that opens the same lobby, to invite someone, lock the room or leave it.
 
 ## Co-op rules
 
@@ -92,6 +81,7 @@ Something not working? See [Troubleshooting](docs/TROUBLESHOOTING.md).
 - Pressing a door makes you wait there. Press again or walk 3 cells away to cancel, so a mistaken press costs nothing.
 - If you wait at different doors, nobody leaves. Meet at the same door to go on together.
 - Ways out without a door, like falls and hidden passages, take one player first and the other follows automatically.
+- Doors into side rooms (challenge rooms, the bank and the like) work the same way: you go in together and come back out together.
 
 **Dying**
 
@@ -131,15 +121,18 @@ Something not working? See [Troubleshooting](docs/TROUBLESHOOTING.md).
 - [x] Shared gear, swapped-out gear
 - [x] The same levels at the lower progress (simulated on one save)
 - [x] Reconnecting after a dropped link, going on alone after the partner leaves
-- [x] Joining mid-run, coming back after a crash with your gear
+- [x] Joining mid-run, coming back after a crash with your gear and its affixes
+- [x] Going into a side room together and back out, in sync on both sides
 - [x] Creating and listing rooms on real Steam
+- [x] The lobby in the main menu and the pause menu (checked on pictures the tests take)
 - [x] All menu text in 13 languages fits the game's fonts
 
 **Not verified yet**
 
 - [ ] P2P connections and invites between two real Steam accounts
 - [ ] A full run played by people
-- [ ] How the lobby looks and responds to keys on a real screen
+- [ ] The lobby with a real mouse and gamepad
+- [ ] The bank and every kind of side room (tested with the first level's rooms)
 - [ ] Writing and reading back a real save in co-op
 - [ ] Normal boss fights against the Giant, the Queen, Dooku and the Collector
 - [ ] The host taking a room back after a crash, and meeting in the level of a continued save (written, not tested yet)
@@ -147,9 +140,8 @@ Something not working? See [Troubleshooting](docs/TROUBLESHOOTING.md).
 
 **Known limits**
 
-- Two players at most, main game only: no daily challenge or Boss Rush.
-- A player coming back gets the items and gold they had when entering the level, but not weapon affixes.
-- The bank and some side rooms are not adapted yet.
+- Two players at most.
+- Main game only: no daily challenge, Boss Rush or custom mode.
 
 Issues are welcome on [GitHub](https://github.com/Ringophilia/Ringo-DeadCell-MP/issues). Please attach the newest log from `coremod\logs`.
 
@@ -206,8 +198,10 @@ The test scripts start two games on a hidden Windows desktop: no windows, no sto
 $env:DEADCELLS_DIR = "D:\your path\Dead Cells"
 tools\net.ps1 240 gather   # door gathering and several levels in a row
 tools\net.ps1 240 team     # going down, rescue, shared items
+tools\net.ps1 240 rooms    # going into a side room together and back out
 tools\join.ps1             # joining mid-run and coming back after a crash
-tools\lobby.ps1            # rooms and lobby
+tools\lobby.ps1            # rooms and lobby, with pictures in build\
+tools\pause.ps1            # the lobby from the pause menu, with pictures
 python -I tools\fontcheck.py "$env:DEADCELLS_DIR\res.pak" mod\RingoMP\Translations.cs
 ```
 

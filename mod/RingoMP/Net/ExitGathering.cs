@@ -1,5 +1,7 @@
+using dc;
 using dc.en;
 using dc.en.inter;
+using dc.en.inter.zdoor;
 using dc.pr;
 using Serilog;
 
@@ -9,10 +11,14 @@ namespace RingoMP.Net
     /// there; pressing again or walking away takes it back, and the choice stays
     /// open until both players wait at the same door. The host then proposes and
     /// the client answers, so a client that just cancelled is never pulled along.
+    /// Doors are the exits to the next level and the ways into a level's side rooms
+    /// and back: room doors, portals and entrance teleporters.
     public sealed class ExitGathering
     {
         const int LeaveRangeCells = 3;
         const double ResendSeconds = 1;
+        // A door can still refuse once both are there, a locked room for one.
+        const double RefusedSeconds = 5;
 
         readonly CoopSession coop;
         readonly Func<NetRole> role;
@@ -20,12 +26,13 @@ namespace RingoMP.Net
         readonly Action<PacketType, Action<BinaryWriter>> send;
         readonly Func<bool> connected;
         readonly TeamLife life;
-        Exit? localExit;
+        Entity? localExit;
         bool localFlag;
         (int X, int Y)? peerDoor;
         bool proposed;
         bool leaving;
         double resendTimer;
+        double transitSeconds;
 
         public bool LocalWaiting => localExit != null;
         public bool PeerWaiting => peerDoor != null;
@@ -46,18 +53,57 @@ namespace RingoMP.Net
             this.log = log;
             this.send = send;
             this.connected = connected;
-            Hook_Exit.onActivate += OnActivate;
+            Hook_Exit.onActivate += (orig, self, by, flag) => OnActivate(self, by, flag, self.locked, () => orig(self, by, flag));
+            Hook_ZDoor.onActivate += (orig, self, by, flag) => OnActivate(self, by, flag, false, () => orig(self, by, flag));
+            Hook_Portal.onActivate += (orig, self, by, flag) => OnActivate(self, by, flag, false, () => orig(self, by, flag));
+            Hook_EntranceTeleporter.onActivate += (orig, self, by, flag) => OnActivate(self, by, flag, false, () => orig(self, by, flag));
+            // These two room doors do their own activating, without the one they are made from.
+            Hook_MonsterDoor.onActivate += (orig, self, by, flag) => OnActivate(self, by, flag, false, () => orig(self, by, flag));
+            Hook_CliffEnigmaZDoor.onActivate += (orig, self, by, flag) => OnActivate(self, by, flag, false, () => orig(self, by, flag));
         }
 
-        void OnActivate(Hook_Exit.orig_onActivate orig, Exit self, Hero by, bool flag)
+        static bool IsDoor(object? entity) => entity is Exit or ZDoor or Portal or EntranceTeleporter;
+
+        static void Activate(Entity door, Hero hero, bool flag)
+        {
+            switch (door)
+            {
+                case Exit exit:
+                    exit.onActivate(hero, flag);
+                    break;
+                case MonsterDoor monsterDoor:
+                    monsterDoor.onActivate(hero, flag);
+                    break;
+                case CliffEnigmaZDoor cliffDoor:
+                    cliffDoor.onActivate(hero, flag);
+                    break;
+                case ChallengeZDoor challengeDoor:
+                    challengeDoor.onActivate(hero, flag);
+                    break;
+                case TumulusAntichamberZDoor tumulusDoor:
+                    tumulusDoor.onActivate(hero, flag);
+                    break;
+                case ZDoor zDoor:
+                    zDoor.onActivate(hero, flag);
+                    break;
+                case Portal portal:
+                    portal.onActivate(hero, flag);
+                    break;
+                case EntranceTeleporter teleporter:
+                    teleporter.onActivate(hero, flag);
+                    break;
+            }
+        }
+
+        void OnActivate(Entity self, Hero by, bool flag, bool locked, Action orig)
         {
             if (by is RemoteHero)
             {
                 return;
             }
-            if (leaving || self.locked || coop.Remote == null || !connected())
+            if (leaving || locked || coop.Remote == null || !connected())
             {
-                orig(self, by, flag);
+                orig();
                 return;
             }
             if (ReferenceEquals(localExit, self))
@@ -96,12 +142,12 @@ namespace RingoMP.Net
             });
         }
 
-        Exit? FindExit((int X, int Y) door)
+        Entity? FindExit((int X, int Y) door)
         {
             var entities = Game.Class.ME.curLevel.entities;
             for (var i = 0; i < entities.length; i++)
             {
-                if (entities.getDyn(i) is Exit exit && exit.cx == door.X && exit.cy == door.Y)
+                if (entities.getDyn(i) is Entity exit && IsDoor(exit) && exit.cx == door.X && exit.cy == door.Y)
                 {
                     return exit;
                 }
@@ -111,6 +157,15 @@ namespace RingoMP.Net
 
         public void Update(double dt)
         {
+            if (InTransit)
+            {
+                transitSeconds += dt;
+                if (transitSeconds >= RefusedSeconds && !Game.Class.ME.hasCinematic())
+                {
+                    log.Information("RINGO the door did not lead anywhere");
+                    InTransit = false;
+                }
+            }
             // A player who is down cannot walk, so the partner's door is theirs too.
             var down = life.Local != DownState.Standing;
             if (down && localExit == null && peerDoor is { } door)
@@ -191,12 +246,14 @@ namespace RingoMP.Net
         void Leave()
         {
             var exit = localExit!;
-            log.Information("RINGO leaving through the door at {x},{y} to {d}", exit.cx, exit.cy, exit.destLevel?.ToString());
+            log.Information("RINGO leaving through the {t} at {x},{y}{d}", exit.GetType().Name, exit.cx, exit.cy,
+                exit is Exit { destLevel: { } dest } ? $" to {dest}" : "");
             leaving = true;
-            exit.onActivate(Game.Class.ME.hero, localFlag);
+            Activate(exit, Game.Class.ME.hero, localFlag);
             leaving = false;
             Reset();
             InTransit = true;
+            transitSeconds = 0;
         }
 
         public void Reset()

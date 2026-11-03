@@ -28,22 +28,21 @@
 ## インストール
 
 1. 2人とも Steam 版『Dead Cells』v35 と [Dead Cells Core Modding](https://github.com/dead-cells-core-modding/core) 35.14.2 が必要です。
-2. [Releases](https://github.com/Ringophilia/Ringo-DeadCell-MP/releases) から `RingoMP-v0.2.0.zip` をダウンロードし、`RingoMP` フォルダをゲームフォルダ内の `coremod\mods\` に入れます。
+2. [Releases](https://github.com/Ringophilia/Ringo-DeadCell-MP/releases) から `RingoMP-v0.3.0.zip` をダウンロードし、`RingoMP` フォルダをゲームフォルダ内の `coremod\mods\` に入れます。
 3. セーブデータをバックアップします：`Steam\userdata\<あなたのID>\588650\remote`
 4. `coremod\core\host\startup\DeadCellsModding.exe` でゲームを起動します。
 
 ## 遊び方
 
 1. メインメニューで **マルチプレイ** を選びます。
-2. **`N`** でルームを作成し **`I`** でフレンドを招待するか、数字キーで一覧のルームに参加します。
-3. フレンドが入ったら、ホストが **`S`** で新規プレイ、**`C`** で続きから。フレンドは自動でついてきます。
+2. **ルームを作成** してから **フレンドを招待**、または一覧のルームを選んで参加します。
+3. フレンドが入ったら、ホストが **新しくプレイを始める** か **セーブしたプレイを続ける** を選びます。フレンドは自動でついてきます。
 
-その他のキー：`R` 更新、`K` 退出させる、`L` ロック、`P` 公開範囲、`X` ルームを閉じる・出る、`Esc` 戻る、`F5` いつでもロビーを開閉。
+ロビーはゲームのオプションと同じ画面です。マウスでクリックするか、キーボードやゲームパッドでほかのメニューと同じように操作できます。プレイ中もポーズメニューの **マルチプレイ** から同じロビーを開けます。サブルーム（チャレンジルーム、銀行など）の扉も出口と同じく、2人そろって出入りします。
 
 ## 既知の制限
 
-- 最大2人、本編のみ。デイリーチャレンジとボスラッシュは非対応です。
-- 復帰したプレイヤーには、そのレベルに入ったときのアイテムとゴールドが戻りますが、武器の追加効果は戻りません。
-- 銀行と一部のサブルームはまだ対応していません。
+- 最大2人。
+- 本編のみ。デイリーチャレンジ、ボスラッシュ、カスタムモードは非対応です。
 
 不具合は [Issues](https://github.com/Ringophilia/Ringo-DeadCell-MP/issues) へ。`coremod\logs` の最新ログを添付してください。よくある問題は [Troubleshooting](TROUBLESHOOTING.md) にあります。

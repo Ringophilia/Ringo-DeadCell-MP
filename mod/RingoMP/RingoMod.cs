@@ -23,12 +23,15 @@ namespace RingoMP
         const string HostAddress = "127.0.0.1";
         const int DefaultPort = 27815;
         const int TestSeed = 424242;
+        const double SnapshotAfterSeconds = 8;
 
         CoopSession? session;
         NetSession? net;
         IScenario? scenario;
         SteamLobby? lobby;
-        RoomPanel? panel;
+        Lobby? lobbyMenu;
+        PauseLobbyTest? pauseTest;
+        double roomTestSeconds = -1;
         string? roomTest;
         bool startLate;
 
@@ -39,8 +42,13 @@ namespace RingoMP
             {
                 net = new NetSession(session, new IdleTransport(), NetRole.Host, Logger, Random.Shared.Next()) { HostLeadsStart = true };
                 lobby = new SteamLobby(Logger, net);
-                panel = new RoomPanel(lobby, net, Logger);
+                lobbyMenu = new Lobby(lobby, net, Logger);
                 roomTest = Environment.GetEnvironmentVariable(RoomTestVariable);
+                if (roomTest == "pause" && Environment.GetEnvironmentVariable("RINGO_SNAPSHOT") is { Length: > 0 } pictures)
+                {
+                    pauseTest = new PauseLobbyTest(lobbyMenu, Logger, pictures);
+                    roomTest = null;
+                }
                 return;
             }
             // A room forms at the title screen or later, long after the mod has loaded.
@@ -102,6 +110,7 @@ namespace RingoMP
                     "progress" => new ProgressScenario(session!, net!, Logger, name),
                     "link" => new LinkScenario(session!, net!, Logger, name),
                     "join" => new JoinScenario(session!, net!, Logger, name),
+                    "rooms" => new RoomScenario(session!, net!, Logger, name),
                     _ => new M2Scenario(session!, Logger, name),
                 };
                 Hook__Save.save += (_, _, _) => { };
@@ -118,7 +127,7 @@ namespace RingoMP
                 {
                     LanguageProbe.Report(Logger);
                 }
-                panel!.Open();
+                lobbyMenu!.Open();
                 if (roomTest == "host")
                 {
                     // Public, so that the other test game can find it in the list.
@@ -126,6 +135,22 @@ namespace RingoMP
                     lobby.Create();
                 }
                 roomTest = null;
+                roomTestSeconds = 0;
+            }
+        }
+
+        /// For tests: a picture of the lobby once it has settled, as nobody can see a hidden desktop.
+        void SnapRoomTest(double dt)
+        {
+            if (roomTestSeconds < 0 || Environment.GetEnvironmentVariable("RINGO_SNAPSHOT") is not { Length: > 0 } path)
+            {
+                return;
+            }
+            roomTestSeconds += dt;
+            if (roomTestSeconds >= SnapshotAfterSeconds)
+            {
+                roomTestSeconds = -1;
+                Snapshot.Request(path, Logger);
             }
         }
 
@@ -137,7 +162,9 @@ namespace RingoMP
             }
             lobby?.Update();
             RunRoomTest();
-            panel?.Update();
+            SnapRoomTest(dt);
+            pauseTest?.Update(dt);
+            lobbyMenu?.Update(dt);
             net?.Update(dt);
             session!.Update();
             if (scenario != null)

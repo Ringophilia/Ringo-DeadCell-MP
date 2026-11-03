@@ -28,22 +28,21 @@ Esta es una guía rápida. Los detalles, el funcionamiento interno y cómo compi
 ## Instalación
 
 1. Ambos jugadores necesitan Dead Cells v35 en Steam y [Dead Cells Core Modding](https://github.com/dead-cells-core-modding/core) 35.14.2.
-2. Descarga `RingoMP-v0.2.0.zip` de [Releases](https://github.com/Ringophilia/Ringo-DeadCell-MP/releases) y coloca la carpeta `RingoMP` en `coremod\mods\` dentro de la carpeta del juego.
+2. Descarga `RingoMP-v0.3.0.zip` de [Releases](https://github.com/Ringophilia/Ringo-DeadCell-MP/releases) y coloca la carpeta `RingoMP` en `coremod\mods\` dentro de la carpeta del juego.
 3. Haz una copia de tu partida: `Steam\userdata\<tu id>\588650\remote`.
 4. Inicia el juego con `coremod\core\host\startup\DeadCellsModding.exe`.
 
 ## Cómo jugar
 
 1. Elige **Multijugador** en el menú principal.
-2. Pulsa **`N`** para crear una sala e **`I`** para invitar a un amigo, o pulsa un número para unirte a una sala de la lista.
-3. Cuando tu amigo esté dentro, el anfitrión pulsa **`S`** para una partida nueva o **`C`** para continuar. Tu amigo se une solo.
+2. Elige **Crear una sala** y luego **Invitar a un amigo**, o elige una sala de la lista para unirte.
+3. Cuando tu amigo esté dentro, el anfitrión elige **Empezar una partida nueva** o **Continuar la partida guardada**. Tu amigo se une solo.
 
-Otras teclas: `R` actualizar, `K` expulsar, `L` bloquear, `P` visibilidad, `X` cerrar o salir de la sala, `Esc` volver, `F5` abrir u ocultar la sala en cualquier momento.
+La sala funciona como las opciones del juego: haz clic con el ratón o muévete con el teclado o el mando como en cualquier otro menú. Durante la partida, el menú de pausa tiene **Multijugador**, que abre la misma sala. Las puertas de las salas secundarias (desafíos, el banco y similares) se cruzan juntos, igual que las salidas de nivel.
 
 ## Limitaciones conocidas
 
-- Dos jugadores como máximo, solo el juego principal: sin desafío diario ni Boss Rush.
-- Quien vuelve recupera los objetos y el oro con los que entró en el nivel, pero no los modificadores de las armas.
-- El banco y algunas salas secundarias aún no están adaptados.
+- Dos jugadores como máximo.
+- Solo el juego principal: sin desafío diario, Boss Rush ni modo personalizado.
 
 Informa de errores en [Issues](https://github.com/Ringophilia/Ringo-DeadCell-MP/issues) y adjunta el registro más reciente de `coremod\logs`. Los problemas habituales están en [Troubleshooting](TROUBLESHOOTING.md).

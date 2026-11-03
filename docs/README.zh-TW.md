@@ -28,22 +28,21 @@
 ## 安裝
 
 1. 兩位玩家都需要 Steam 正版《死亡細胞》v35 與 [Dead Cells Core Modding](https://github.com/dead-cells-core-modding/core) 35.14.2。
-2. 從 [Releases](https://github.com/Ringophilia/Ringo-DeadCell-MP/releases) 下載 `RingoMP-v0.2.0.zip`，把 `RingoMP` 資料夾放進遊戲目錄的 `coremod\mods\`。
+2. 從 [Releases](https://github.com/Ringophilia/Ringo-DeadCell-MP/releases) 下載 `RingoMP-v0.3.0.zip`，把 `RingoMP` 資料夾放進遊戲目錄的 `coremod\mods\`。
 3. 備份存檔：`Steam\userdata\<你的ID>\588650\remote`。
 4. 執行 `coremod\core\host\startup\DeadCellsModding.exe` 啟動遊戲。
 
 ## 怎麼玩
 
 1. 主選單選 **多人遊戲**。
-2. 按 **`N`** 建立房間、**`I`** 呼叫好友，或按數字鍵加入列表中的房間。
-3. 好友加入後，房主按 **`S`** 開始新遊戲或 **`C`** 繼續存檔，好友會自動跟上。
+2. 選擇 **建立房間**，再選 **呼叫好友**；或直接選列表中的房間加入。
+3. 好友加入後，房主選擇 **開始新遊戲** 或 **繼續存檔**，好友會自動跟上。
 
-其他按鍵：`R` 重新整理、`K` 移出玩家、`L` 鎖定、`P` 切換可見範圍、`X` 關閉或退出房間、`Esc` 返回、`F5` 隨時開關大廳。
+大廳和遊戲的設定選單是同一種介面：可以用滑鼠點選，也可以用鍵盤或手把移動、確認。局內的暫停選單也有 **多人遊戲**，打開的是同一個大廳。進出子房間（挑戰房、銀行等）的門和過關的門一樣，兩人一起進出。
 
 ## 已知限制
 
-- 最多 2 人，只支援主線，不含每日挑戰與 Boss Rush。
-- 回來的玩家會恢復進入當前關卡時的物品與金幣，但不含武器附加詞條。
-- 銀行與部分子房間尚未適配。
+- 最多 2 人。
+- 只支援主線，不含每日挑戰、Boss Rush 與自訂模式。
 
 問題請到 [Issues](https://github.com/Ringophilia/Ringo-DeadCell-MP/issues) 回報，並附上 `coremod\logs` 裡最新的記錄檔。常見問題見 [Troubleshooting](TROUBLESHOOTING.md)。

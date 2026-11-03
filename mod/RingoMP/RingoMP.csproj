@@ -7,8 +7,8 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ModType>mod</ModType>
     <ModName>RingoMP</ModName>
-    <Version>0.2.0</Version>
-    <ModVersion>0.2.0</ModVersion>
+    <Version>0.3.0</Version>
+    <ModVersion>0.3.0</ModVersion>
     <ModMain>RingoMP.RingoMod</ModMain>
     <AutoInstallMod>true</AutoInstallMod>
   </PropertyGroup>
