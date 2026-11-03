@@ -10,7 +10,7 @@ namespace RingoMP.Net
     /// that runs over a direct link to the room's owner.
     public sealed class SteamLobby
     {
-        const int Capacity = 2;
+        const int Capacity = NetSession.MaxPlayers;
         const int MaxListedRooms = 50;
         const double RefreshFriendsAfterSeconds = 0;
         const string MarkKey = "ringomp";
@@ -34,6 +34,7 @@ namespace RingoMP.Net
         readonly HashSet<ulong> kicked = [];
         CSteamID lobby = CSteamID.Nil;
         CSteamID joinAtStart = CSteamID.Nil;
+        CSteamID dialled = CSteamID.Nil;
         ELobbyType visibility = ELobbyType.k_ELobbyTypeFriendsOnly;
         bool locked;
         bool busy;
@@ -98,10 +99,24 @@ namespace RingoMP.Net
                 TakeOver();
                 PublishState();
             }
+            else if (InRoom && !busy && SteamMatchmaking.GetLobbyOwner(lobby) is var owner && owner.IsValid() && owner != dialled)
+            {
+                // The owner left and Steam handed the room to someone else, who hosts it now.
+                log.Information("RINGO the room has a new owner");
+                net.HostLeft();
+                Dial(owner);
+            }
         }
 
-        /// Steam hands a room to the one left in it when its owner's game is gone.
-        /// The session went on alone by then, and now waits here for the owner to come back.
+        void Dial(CSteamID owner)
+        {
+            dialled = owner;
+            hosting = false;
+            net.Attach(SteamTransport.JoinP2P(log, owner), NetRole.Client);
+        }
+
+        /// Steam hands a room to one of those left in it when its owner's game is gone.
+        /// The session went on alone by then, and now waits here for the others.
         void TakeOver()
         {
             if (hosting)
@@ -124,7 +139,8 @@ namespace RingoMP.Net
             SteamMatchmaking.SetLobbyData(lobby, MarkKey, MarkValue);
             SteamMatchmaking.SetLobbyData(lobby, NameKey, $"{SteamFriends.GetPersonaName()}");
             SteamFriends.SetRichPresence(ConnectKey, $"{ConnectArgument} {lobby.m_SteamID}");
-            net.Attach(SteamTransport.HostP2P(log, MayConnect), NetRole.Host);
+            dialled = SteamUser.GetSteamID();
+            net.Attach(SteamTransport.HostP2P(log, MayConnect, Capacity), NetRole.Host);
         }
 
         void PublishState()
@@ -254,8 +270,7 @@ namespace RingoMP.Net
                 return;
             }
             lobby = new CSteamID(result.m_ulSteamIDLobby);
-            hosting = false;
-            net.Attach(SteamTransport.JoinP2P(log, SteamMatchmaking.GetLobbyOwner(lobby)), NetRole.Client);
+            Dial(SteamMatchmaking.GetLobbyOwner(lobby));
         }
 
         void OnMembersChanged(LobbyChatUpdate_t change) =>
@@ -303,19 +318,15 @@ namespace RingoMP.Net
             }
         }
 
-        public void KickPartner()
+        public void Kick(CSteamID player)
         {
-            if (!IsOwner)
+            if (!IsOwner || player == SteamUser.GetSteamID())
             {
                 return;
             }
-            var self = SteamUser.GetSteamID();
-            foreach (var (_, _, id) in Members().Where(m => m.Id != self))
-            {
-                kicked.Add(id.m_SteamID);
-                log.Information("RINGO removing a player from the room");
-            }
-            net.Kick();
+            kicked.Add(player.m_SteamID);
+            log.Information("RINGO removing a player from the room");
+            net.Kick(player.m_SteamID);
         }
 
         /// The owner leaving closes the room for everyone.
@@ -339,6 +350,7 @@ namespace RingoMP.Net
             SteamMatchmaking.LeaveLobby(lobby);
             SteamFriends.SetRichPresence(ConnectKey, null);
             lobby = CSteamID.Nil;
+            dialled = CSteamID.Nil;
             hosting = false;
             locked = false;
             kicked.Clear();

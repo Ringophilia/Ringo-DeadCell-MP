@@ -8,7 +8,8 @@ namespace RingoMP.Net
     {
         public static void Say(Phrase phrase)
         {
-            if (Game.Class.ME?.hero is { } hero)
+            // Between levels a hero has nowhere to show it, and the game would crash trying.
+            if (Game.Class.ME?.hero is { destroyed: false, _level: { destroyed: false } } hero)
             {
                 hero.say(Translations.Get(phrase).AsHaxeString(), null, null, null);
             }

@@ -24,6 +24,12 @@ namespace RingoMP.Net
         Kicked,
         Look,
         LevelContents,
+        // The host tells a player who joined which player they are.
+        Welcome,
+        // The host tells the others that a player is gone.
+        PeerGone,
+        // What one player sent, passed on by the host to the others: their number, then the packet.
+        Relay,
     }
 
     /// One hero's state, sent 30 times a second by the player who owns it.

@@ -10,6 +10,8 @@ $startup = "$core\core\host\startup"
 $pause = 6
 
 $env:RINGO_SCENARIO = $Scenario
+# These start at the title screen, as rooms do, with the host leading.
+if ($Scenario -in 'link', 'modes') { $env:RINGO_LATE = '1' }
 $started = Get-Date
 
 $env:RINGO_ROLE = 'host'

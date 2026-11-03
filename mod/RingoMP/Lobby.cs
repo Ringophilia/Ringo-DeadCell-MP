@@ -258,13 +258,15 @@ namespace RingoMP
             {
                 page.Add(new LobbyEntry(Translations.Get(Phrase.ActionStartRun), null, () => Launch(new LaunchMode.NewGame(false, false))));
                 page.Add(new LobbyEntry(Translations.Get(Phrase.ActionContinueRun), null, () => Launch(new LaunchMode.LoadSave())));
+                page.Add(new LobbyEntry(Translations.Get(Phrase.ActionDailyRun), Translations.Get(Phrase.ActionDailyRunHelp),
+                    () => Launch(new LaunchMode.NewScoringGame())));
             }
             page.Add(new LobbyEntry(Translations.Get(Phrase.ActionInvite), Translations.Get(Phrase.ActionInviteHelp), lobby.Invite));
             if (lobby.IsOwner)
             {
-                if (members.Count > 1)
+                foreach (var (name, owner, id) in members.Where(m => !m.Owner))
                 {
-                    page.Add(new LobbyEntry(Translations.Get(Phrase.ActionKick), null, lobby.KickPartner));
+                    page.Add(new LobbyEntry(Translations.Get(Phrase.ActionKickPlayer, Translations.Drawable(name)), null, () => lobby.Kick(id)));
                 }
                 page.Add(new LobbyEntry(Translations.Get(lobby.Locked ? Phrase.RoomLocked : Phrase.RoomOpen), Translations.Get(Phrase.LockHelp), lobby.ToggleLocked, Id: "lock"));
                 page.Add(new LobbyEntry(Translations.Get(Phrase.ActionVisibility,

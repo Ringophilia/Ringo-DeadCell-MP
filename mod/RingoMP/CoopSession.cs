@@ -19,10 +19,16 @@ namespace RingoMP
         bool insideHook;
         int frame;
 
-        public RemoteHero? Remote { get; private set; }
+        readonly SortedDictionary<int, RemoteHero> remotes = [];
 
-        /// Set by a networked game before the remote hero spawns.
-        public Action<int>? RemoteHit { get; set; }
+        /// The other players' heroes, by player.
+        public IReadOnlyDictionary<int, RemoteHero> Remotes => remotes;
+
+        /// The first other player's hero, for what only ever has one partner.
+        public RemoteHero? Remote => remotes.Values.FirstOrDefault();
+
+        /// Set by a networked game before a remote hero spawns: which player was hit, and how hard.
+        public Action<int, int>? RemoteHit { get; set; }
 
         public CoopSession(ILogger logger)
         {
@@ -37,21 +43,30 @@ namespace RingoMP
         public static bool CanSpawn(Game? game) =>
             game?.hero != null && game.curLevel != null && game.hero.awake && game.hero.cx >= 0;
 
-        public RemoteHero Spawn(Game game)
+        public RemoteHero Spawn(Game game, int slot = 1)
         {
             var main = game.hero;
-            var remote = new RemoteHero(game, new VirtualController());
+            var remote = new RemoteHero(game, new VirtualController()) { Slot = slot };
             remote.wakeup(game.curLevel, main.cx, main.cy);
             remote.controller = remote.Input.Access;
             remote.isAlwaysUpdated = true;
-            remote.ReportHit = RemoteHit;
-            Remote = remote;
-            log.Information("RINGO remote hero spawned at {x},{y}", remote.cx, remote.cy);
+            remote.ReportHit = damage => RemoteHit?.Invoke(slot, damage);
+            remotes[slot] = remote;
+            log.Information("RINGO remote hero {s} spawned at {x},{y}", slot, remote.cx, remote.cy);
             return remote;
         }
 
-        /// The game that held the remote hero is gone.
-        public void Forget() => Remote = null;
+        /// The game that held the remote heroes is gone.
+        public void Forget() => remotes.Clear();
+
+        /// A player left: their hero goes.
+        public void Remove(int slot)
+        {
+            if (remotes.Remove(slot, out var remote) && !remote.destroyed)
+            {
+                remote.destroy();
+            }
+        }
 
         public static void Give(Hero hero, string itemId)
         {
@@ -64,14 +79,16 @@ namespace RingoMP
 
         public void Update()
         {
-            var remote = Remote;
-            if (remote == null)
+            if (++frame % KeepAliveEveryFrames != 0)
             {
                 return;
             }
-            if (++frame % KeepAliveEveryFrames == 0 && remote._level != null)
+            foreach (var remote in remotes.Values)
             {
-                KeepNearbyAlive(remote);
+                if (remote._level != null)
+                {
+                    KeepNearbyAlive(remote);
+                }
             }
         }
 
@@ -94,13 +111,16 @@ namespace RingoMP
         void OnHeroClean(Hook_Hero.orig_clean orig, Hero self)
         {
             orig(self);
-            if (!insideHook && Remote is { } remote && !ReferenceEquals(self, remote)
-                && ReferenceEquals(self, Game.Class.ME?.hero) && remote._level != null)
+            if (insideHook || self is RemoteHero || !ReferenceEquals(self, Game.Class.ME?.hero))
+            {
+                return;
+            }
+            foreach (var remote in remotes.Values.Where(r => r._level != null).ToList())
             {
                 insideHook = true;
                 remote.clean();
                 insideHook = false;
-                log.Information("RINGO remote hero left its level");
+                log.Information("RINGO remote hero {s} left its level", remote.Slot);
             }
         }
 
@@ -108,7 +128,11 @@ namespace RingoMP
         Hero OnInitHero(Hook_Game.orig_initHero orig, Game self, Level lvl, int cx, int cy, UsableBody from, bool fromDeadBody, Level oldLevel)
         {
             var result = orig(self, lvl, cx, cy, from, fromDeadBody, oldLevel);
-            if (!insideHook && Remote is { } remote && remote._level == null)
+            if (insideHook)
+            {
+                return result;
+            }
+            foreach (var remote in remotes.Values.Where(r => r._level == null).ToList())
             {
                 insideHook = true;
                 var main = self.hero;
@@ -116,7 +140,7 @@ namespace RingoMP
                 orig(self, lvl, cx, cy, null, true, oldLevel);
                 self.hero = main;
                 insideHook = false;
-                log.Information("RINGO remote hero entered level at {x},{y}", remote.cx, remote.cy);
+                log.Information("RINGO remote hero {s} entered level at {x},{y}", remote.Slot, remote.cx, remote.cy);
             }
             return result;
         }

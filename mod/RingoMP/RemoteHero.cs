@@ -18,6 +18,9 @@ namespace RingoMP
 
         public VirtualController Input { get; }
 
+        /// Which player this is: the host is 0, the others are numbered as they joined.
+        public int Slot { get; init; }
+
         /// Set in a networked game; takes the damage this hero would have taken.
         public Action<int>? ReportHit { get; set; }
 
@@ -26,6 +29,9 @@ namespace RingoMP
         /// What the partner wears, where this game has it. The game draws a hero in
         /// what the local save says, so that is swapped while this hero is drawn.
         public (string? Skin, string? Head)? Outfit { get; set; }
+
+        /// Its player is somewhere else, in a side room or still on the way here.
+        public bool Away { get; private set; }
 
         public RemoteHero(Game game, VirtualController input) : base(game)
         {
@@ -160,7 +166,24 @@ namespace RingoMP
         {
         }
 
-        public override bool canBeHitBy(Entity by) => !Downed && base.canBeHitBy(by);
+        public override bool canBeHitBy(Entity by) => !Downed && !Away && base.canBeHitBy(by);
+
+        /// A player who is not here leaves no hero standing around: it keeps its place,
+        /// out of sight and out of the mobs' way, until they are back.
+        public void SetAway(bool away)
+        {
+            if (away == Away)
+            {
+                return;
+            }
+            Away = away;
+            Input.ReleaseAll();
+            set_targetable(!away && !Downed);
+            if (spr != null)
+            {
+                spr.visible = !away;
+            }
+        }
 
         public void GoDown()
         {
@@ -175,7 +198,7 @@ namespace RingoMP
         {
             Downed = false;
             life = newLife;
-            set_targetable(true);
+            set_targetable(!Away);
         }
 
         object IHxbitSerializable<object>.GetData() => new();

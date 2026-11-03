@@ -15,7 +15,6 @@ namespace RingoMP
         const string RoleVariable = "RINGO_ROLE";
         const string PortVariable = "RINGO_PORT";
         const string SeedVariable = "RINGO_SEED";
-        const string TransportVariable = "RINGO_TRANSPORT";
         const string LossVariable = "RINGO_LOSS";
         const string LagVariable = "RINGO_LAG";
         const string StartLateVariable = "RINGO_LATE";
@@ -69,16 +68,13 @@ namespace RingoMP
         static int SeedFromTest() =>
             int.TryParse(Environment.GetEnvironmentVariable(SeedVariable), out var seed) ? seed : TestSeed;
 
+        /// Test games on one machine link over plain IP, through Steam's sockets all the same.
         ITransport CreateTransport(bool isHost, int port)
         {
-            if (Environment.GetEnvironmentVariable(TransportVariable) != "steam")
-            {
-                return isHost ? LanTransport.Host(port) : LanTransport.Join(HostAddress, port, port + 1);
-            }
             var loss = Number(LossVariable);
             var lag = (int)Number(LagVariable);
             return isHost
-                ? SteamTransport.HostIp(Logger, (ushort)port, loss, lag)
+                ? SteamTransport.HostIp(Logger, (ushort)port, loss, lag, NetSession.MaxPlayers)
                 : SteamTransport.JoinIp(Logger, HostAddress, (ushort)port, loss, lag);
         }
 
@@ -111,6 +107,8 @@ namespace RingoMP
                     "link" => new LinkScenario(session!, net!, Logger, name),
                     "join" => new JoinScenario(session!, net!, Logger, name),
                     "rooms" => new RoomScenario(session!, net!, Logger, name),
+                    "modes" => new ModesScenario(session!, net!, Logger, name),
+                    "crowd" => new CrowdScenario(session!, net!, Logger, name),
                     _ => new M2Scenario(session!, Logger, name),
                 };
                 Hook__Save.save += (_, _, _) => { };

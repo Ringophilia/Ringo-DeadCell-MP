@@ -9,8 +9,8 @@ namespace RingoMP.Net
 {
     /// Nobody leaves a level alone. Activating a door marks the player as waiting
     /// there; pressing again or walking away takes it back, and the choice stays
-    /// open until both players wait at the same door. The host then proposes and
-    /// the client answers, so a client that just cancelled is never pulled along.
+    /// open until every player waits at the same door. The host then proposes and
+    /// the others answer, so a player who just cancelled is never pulled along.
     /// Doors are the exits to the next level and the ways into a level's side rooms
     /// and back: room doors, portals and entrance teleporters.
     public sealed class ExitGathering
@@ -28,14 +28,15 @@ namespace RingoMP.Net
         readonly TeamLife life;
         Entity? localExit;
         bool localFlag;
-        (int X, int Y)? peerDoor;
+        readonly Dictionary<int, (int X, int Y)> peerDoors = [];
         bool proposed;
         bool leaving;
         double resendTimer;
         double transitSeconds;
 
         public bool LocalWaiting => localExit != null;
-        public bool PeerWaiting => peerDoor != null;
+        /// Someone else waits at a door.
+        public bool PeerWaiting => peerDoors.Count > 0;
 
         /// Through a door or on the way after the other player, until the next level is here.
         public bool InTransit { get; set; }
@@ -101,7 +102,7 @@ namespace RingoMP.Net
             {
                 return;
             }
-            if (leaving || locked || coop.Remote == null || !connected())
+            if (leaving || locked || coop.Remotes.Count == 0 || !connected())
             {
                 orig();
                 return;
@@ -166,11 +167,11 @@ namespace RingoMP.Net
                     InTransit = false;
                 }
             }
-            // A player who is down cannot walk, so the partner's door is theirs too.
+            // A player who is down cannot walk, so another player's door is theirs too.
             var down = life.Local != DownState.Standing;
-            if (down && localExit == null && peerDoor is { } door)
+            if (down && localExit == null && peerDoors.Count > 0)
             {
-                localExit = FindExit(door);
+                localExit = FindExit(peerDoors.Values.First());
             }
             if (localExit != null)
             {
@@ -187,8 +188,9 @@ namespace RingoMP.Net
                     SendDoor();
                 }
             }
-            var partnerReady = LocalDoor == peerDoor || life.Peer != DownState.Standing;
-            if (role() == NetRole.Host && !proposed && localExit != null && partnerReady)
+            var othersReady = coop.Remotes.Keys.All(slot =>
+                (peerDoors.TryGetValue(slot, out var door) && LocalDoor == door) || life.PeerState(slot) != DownState.Standing);
+            if (role() == NetRole.Host && !proposed && localExit != null && othersReady)
             {
                 proposed = true;
                 send(PacketType.ExitGo, w =>
@@ -199,21 +201,22 @@ namespace RingoMP.Net
             }
         }
 
-        public void OnPeerDoor(BinaryReader reader)
+        public void OnPeerDoor(int slot, BinaryReader reader)
         {
             var waiting = reader.ReadBoolean();
             var door = (reader.ReadInt32(), reader.ReadInt32());
             var next = waiting ? door : ((int, int)?)null;
-            if (next == peerDoor)
+            if (next == (peerDoors.TryGetValue(slot, out var known) ? known : ((int, int)?)null))
             {
                 return;
             }
-            peerDoor = next;
             if (!waiting)
             {
+                peerDoors.Remove(slot);
                 proposed = false;
                 return;
             }
+            peerDoors[slot] = door;
             PeerWaits++;
             if (localExit == null || LocalDoor == next)
             {
@@ -225,7 +228,7 @@ namespace RingoMP.Net
             }
         }
 
-        /// A proposal for a door the client no longer waits at is ignored: its
+        /// A proposal for a door this player no longer waits at is ignored: its
         /// cancel is already on the way and clears the proposal on the host.
         public void OnProposal(BinaryReader reader)
         {
@@ -241,7 +244,16 @@ namespace RingoMP.Net
             }
         }
 
-        public void OnAccepted() => Leave();
+        /// The first answer is enough: the others heard the same proposal.
+        public void OnAccepted()
+        {
+            if (localExit != null)
+            {
+                Leave();
+            }
+        }
+
+        public void ForgetPeer(int slot) => peerDoors.Remove(slot);
 
         void Leave()
         {
@@ -259,7 +271,7 @@ namespace RingoMP.Net
         public void Reset()
         {
             localExit = null;
-            peerDoor = null;
+            peerDoors.Clear();
             proposed = false;
             InTransit = false;
         }

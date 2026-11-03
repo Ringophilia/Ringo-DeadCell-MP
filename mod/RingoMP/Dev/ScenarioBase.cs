@@ -33,6 +33,9 @@ namespace RingoMP.Dev
         /// Holds the start of the run, for a game waiting on the host.
         protected virtual bool CanStart => true;
 
+        /// The run a test starts with.
+        protected virtual LaunchMode StartMode => new LaunchMode.NewGame(false, false);
+
         /// Holds the remote hero back, for a game waiting on the other player.
         protected virtual bool CanSpawnRemote => true;
 
@@ -82,7 +85,7 @@ namespace RingoMP.Dev
                     }
                     else if (Main.Class.ME?.curProcess is TitleScreen && phaseTime > SettleSeconds && CanStart)
                     {
-                        Main.Class.ME.launchGame(new LaunchMode.NewGame(false, false), null, null);
+                        Main.Class.ME.launchGame(StartMode, null, null);
                         Enter(Phase.Cinematic);
                     }
                     break;
@@ -120,7 +123,26 @@ namespace RingoMP.Dev
                 return;
             }
             phaseTime = 0;
+            // A popup waits for a key: the daily challenge warns that a modded game saves no score.
+            if (dc.ui.ModalPopUp.Class.ME is { destroyed: false, closing: false } popup)
+            {
+                log.Information("RINGO closing a popup, as a player would");
+                popup.close();
+            }
+            var before = cineWait;
             cineWait += FrameTime;
+            // What holds a start up, for a test game nobody can see.
+            if ((int)(before / 10) != (int)(cineWait / 10))
+            {
+                var game = CurrentGame;
+                log.Information("RINGO waiting to start: hero={h} awake={a} cx={x} level={l} cinematic={c} cine={n} process={p}",
+                    game?.hero != null, game?.hero?.awake, game?.hero?.cx, game?.curLevel != null, game?.hasCinematic(),
+                    game?.curCine?.GetType().Name, Main.Class.ME?.curProcess?.GetType().Name);
+                if (Environment.GetEnvironmentVariable("RINGO_SNAPSHOT") is { Length: > 0 } pictures)
+                {
+                    Snapshot.Request(System.IO.Path.Combine(pictures, $"start-{name}-{(int)cineWait}.png"), log);
+                }
+            }
             if (cineWait > CineTimeoutSeconds && CurrentGame?.curCine != null)
             {
                 log.Warning("RINGO cinematic {c} still running, closing it", CurrentGame.curCine.GetType().Name);

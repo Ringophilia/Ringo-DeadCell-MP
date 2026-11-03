@@ -131,8 +131,8 @@ namespace RingoMP.Dev
             var old = CurrentLevel;
             return Expect("arrived together in a new level", () =>
             {
-                var game = CurrentGame;
-                return !ReferenceEquals(game.curLevel, old) && net.LevelsMatch && !game.hasCinematic() && Remote._level != null;
+                // The game is gone on the death screen.
+                return CurrentGame is { } game && !ReferenceEquals(game.curLevel, old) && net.LevelsMatch && !game.hasCinematic() && Session.Remote?._level != null;
             }, LevelLoadSeconds);
         }
 

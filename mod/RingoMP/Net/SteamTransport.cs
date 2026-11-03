@@ -5,34 +5,42 @@ namespace RingoMP.Net
 {
     /// Steam's networking sockets carry both kinds of packet over one connection,
     /// through its relays when the players cannot reach each other directly. They
-    /// also speak plain IP, which is how two games on one Steam account test all of
+    /// also speak plain IP, which is how games on one Steam account test all of
     /// this: an account cannot open a P2P connection to itself.
-    /// The joining side keeps dialling until the link is back.
+    /// A host takes a connection from each player who joins, up to the room's size;
+    /// the joining side keeps dialling until its link is back.
     public sealed unsafe class SteamTransport : ITransport
     {
+        public const int HostLink = 0;
         const int MaxMessagesPerUpdate = 64;
         const int VirtualPort = 0;
         const int CloseReason = 0;
         const double RetrySeconds = 3;
 
         readonly ILogger log;
-        readonly Queue<byte[]> inbox = new();
+        readonly Queue<(byte[] Packet, int Link)> inbox = new();
         readonly IntPtr[] messages = new IntPtr[MaxMessagesPerUpdate];
         readonly Callback<SteamNetConnectionStatusChangedCallback_t> statusChanged;
         readonly Func<HSteamNetConnection>? dial;
         readonly Func<CSteamID, bool>? mayConnect;
+        readonly int maxLinks;
         readonly HSteamListenSocket listener = HSteamListenSocket.Invalid;
-        HSteamNetConnection connection = HSteamNetConnection.Invalid;
+        // A link is known from the moment it is accepted or dialled, and up once connected.
+        readonly Dictionary<HSteamNetConnection, int> links = [];
+        readonly HashSet<int> up = [];
         double retryIn;
         bool dialling = true;
 
-        public bool Connected { get; private set; }
+        public bool Connected => up.Count > 0;
 
-        SteamTransport(ILogger log, Func<HSteamListenSocket>? listen, Func<HSteamNetConnection>? dial, Func<CSteamID, bool>? mayConnect)
+        public IReadOnlyCollection<int> Links => up;
+
+        SteamTransport(ILogger log, Func<HSteamListenSocket>? listen, Func<HSteamNetConnection>? dial, Func<CSteamID, bool>? mayConnect, int maxLinks)
         {
             this.log = log;
             this.dial = dial;
             this.mayConnect = mayConnect;
+            this.maxLinks = maxLinks;
             statusChanged = Callback<SteamNetConnectionStatusChangedCallback_t>.Create(OnStatusChanged);
             if (listen != null)
             {
@@ -41,10 +49,10 @@ namespace RingoMP.Net
             }
         }
 
-        public static SteamTransport HostP2P(ILogger log, Func<CSteamID, bool> mayConnect)
+        public static SteamTransport HostP2P(ILogger log, Func<CSteamID, bool> mayConnect, int maxPlayers)
         {
             SteamNetworkingUtils.InitRelayNetworkAccess();
-            return new SteamTransport(log, () => SteamNetworkingSockets.CreateListenSocketP2P(VirtualPort, 0, null), null, mayConnect);
+            return new SteamTransport(log, () => SteamNetworkingSockets.CreateListenSocketP2P(VirtualPort, 0, null), null, mayConnect, maxPlayers - 1);
         }
 
         public static SteamTransport JoinP2P(ILogger log, CSteamID host)
@@ -52,21 +60,21 @@ namespace RingoMP.Net
             SteamNetworkingUtils.InitRelayNetworkAccess();
             var identity = new SteamNetworkingIdentity();
             identity.SetSteamID(host);
-            return new SteamTransport(log, null, () => SteamNetworkingSockets.ConnectP2P(ref identity, VirtualPort, 0, null), null);
+            return new SteamTransport(log, null, () => SteamNetworkingSockets.ConnectP2P(ref identity, VirtualPort, 0, null), null, 1);
         }
 
-        public static SteamTransport HostIp(ILogger log, ushort port, float lossPercent, int lagMs)
+        public static SteamTransport HostIp(ILogger log, ushort port, float lossPercent, int lagMs, int maxPlayers)
         {
             var address = Address("0.0.0.0", port);
             var options = TestOptions(lossPercent, lagMs);
-            return new SteamTransport(log, () => SteamNetworkingSockets.CreateListenSocketIP(ref address, options.Length, options), null, null);
+            return new SteamTransport(log, () => SteamNetworkingSockets.CreateListenSocketIP(ref address, options.Length, options), null, null, maxPlayers - 1);
         }
 
         public static SteamTransport JoinIp(ILogger log, string host, ushort port, float lossPercent, int lagMs)
         {
             var address = Address(host, port);
             var options = TestOptions(lossPercent, lagMs);
-            return new SteamTransport(log, null, () => SteamNetworkingSockets.ConnectByIPAddress(ref address, options.Length, options), null);
+            return new SteamTransport(log, null, () => SteamNetworkingSockets.ConnectByIPAddress(ref address, options.Length, options), null, 1);
         }
 
         static SteamNetworkingIPAddr Address(string host, ushort port)
@@ -77,7 +85,7 @@ namespace RingoMP.Net
             return address;
         }
 
-        /// Both games on one account have the same identity, so IP links skip
+        /// Games on one account have the same identity, so IP links skip
         /// authentication. Simulated loss and lag only exist as global settings.
         static SteamNetworkingConfigValue_t[] TestOptions(float lossPercent, int lagMs)
         {
@@ -102,6 +110,8 @@ namespace RingoMP.Net
                 IntPtr.Zero, type, (IntPtr)(&bits));
         }
 
+        bool IsHost => listener != HSteamListenSocket.Invalid;
+
         void OnStatusChanged(SteamNetConnectionStatusChangedCallback_t change)
         {
             switch (change.m_info.m_eState)
@@ -111,18 +121,23 @@ namespace RingoMP.Net
                     break;
 
                 case ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connected:
-                    log.Information("RINGO link up");
-                    Connected = true;
+                    if (links.TryGetValue(change.m_hConn, out var link))
+                    {
+                        log.Information("RINGO link {l} up", link);
+                        up.Add(link);
+                    }
                     break;
 
                 case ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_ClosedByPeer:
                 case ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
                     log.Information("RINGO link closed: {reason}", change.m_info.m_szEndDebug);
-                    SteamNetworkingSockets.CloseConnection(change.m_hConn, CloseReason, null, false);
-                    if (change.m_hConn == connection)
+                    // What arrived before the close still counts: a goodbye, for one.
+                    if (links.TryGetValue(change.m_hConn, out var closing))
                     {
-                        Lose();
+                        Drain(change.m_hConn, closing);
                     }
+                    SteamNetworkingSockets.CloseConnection(change.m_hConn, CloseReason, null, false);
+                    Lose(change.m_hConn);
                     break;
             }
         }
@@ -134,89 +149,127 @@ namespace RingoMP.Net
             {
                 return;
             }
-            if (mayConnect != null && !mayConnect(change.m_info.m_identityRemote.GetSteamID()))
+            if ((mayConnect != null && !mayConnect(change.m_info.m_identityRemote.GetSteamID())) || links.Count >= maxLinks)
             {
+                log.Information("RINGO turned a connection away, {n} of {m} links taken", links.Count, maxLinks);
                 SteamNetworkingSockets.CloseConnection(change.m_hConn, CloseReason, null, false);
                 return;
             }
-            // A partner coming back may get here before the old link has timed out.
-            if (connection != HSteamNetConnection.Invalid)
+            // Players are numbered from 1, the host being 0; a free number is reused.
+            var link = 1;
+            while (links.ContainsValue(link))
             {
-                SteamNetworkingSockets.CloseConnection(connection, CloseReason, null, false);
+                link++;
             }
-            connection = change.m_hConn;
+            links[change.m_hConn] = link;
             SteamNetworkingSockets.AcceptConnection(change.m_hConn);
         }
 
-        void Lose()
+        void Lose(HSteamNetConnection connection)
         {
-            connection = HSteamNetConnection.Invalid;
-            Connected = false;
-            retryIn = RetrySeconds;
+            if (links.Remove(connection, out var link))
+            {
+                up.Remove(link);
+                retryIn = RetrySeconds;
+            }
         }
 
         public void Update(double dt)
         {
             SteamAPI.RunCallbacks();
             SteamNetworkingSockets.RunCallbacks();
-            if (dial != null && dialling && connection == HSteamNetConnection.Invalid)
+            if (dial != null && dialling && links.Count == 0)
             {
                 retryIn -= dt;
                 if (retryIn <= 0)
                 {
                     retryIn = RetrySeconds;
-                    connection = dial();
+                    var connection = dial();
+                    if (connection != HSteamNetConnection.Invalid)
+                    {
+                        links[connection] = HostLink;
+                    }
                 }
             }
-            if (connection == HSteamNetConnection.Invalid)
+            foreach (var (connection, link) in links.ToList())
             {
-                return;
+                Receive(connection, link);
             }
+        }
+
+        int Receive(HSteamNetConnection connection, int link)
+        {
             var count = SteamNetworkingSockets.ReceiveMessagesOnConnection(connection, messages, MaxMessagesPerUpdate);
             for (var i = 0; i < count; i++)
             {
                 var message = SteamNetworkingMessage_t.FromIntPtr(messages[i]);
                 var packet = new byte[message.m_cbSize];
                 System.Runtime.InteropServices.Marshal.Copy(message.m_pData, packet, 0, packet.Length);
-                inbox.Enqueue(packet);
+                inbox.Enqueue((packet, link));
                 SteamNetworkingMessage_t.Release(messages[i]);
+            }
+            return count;
+        }
+
+        void Drain(HSteamNetConnection connection, int link)
+        {
+            while (Receive(connection, link) > 0)
+            {
             }
         }
 
-        public void SendReliable(byte[] packet) => Send(packet, Constants.k_nSteamNetworkingSend_ReliableNoNagle);
-
-        public void SendUnreliable(byte[] packet) => Send(packet, Constants.k_nSteamNetworkingSend_UnreliableNoDelay);
-
-        void Send(byte[] packet, int flags)
+        public void Send(int link, byte[] packet, bool reliable)
         {
-            if (!Connected)
+            if (!up.Contains(link))
             {
                 return;
             }
-            fixed (byte* data = packet)
+            var flags = reliable ? Constants.k_nSteamNetworkingSend_ReliableNoNagle : Constants.k_nSteamNetworkingSend_UnreliableNoDelay;
+            foreach (var (connection, other) in links)
             {
-                SteamNetworkingSockets.SendMessageToConnection(connection, (IntPtr)data, (uint)packet.Length, flags, out _);
+                if (other == link)
+                {
+                    fixed (byte* data = packet)
+                    {
+                        SteamNetworkingSockets.SendMessageToConnection(connection, (IntPtr)data, (uint)packet.Length, flags, out _);
+                    }
+                    return;
+                }
             }
         }
 
-        public bool TryReceive(out byte[] packet) => inbox.TryDequeue(out packet!);
+        public bool TryReceive(out byte[] packet, out int link)
+        {
+            if (inbox.TryDequeue(out var next))
+            {
+                (packet, link) = next;
+                return true;
+            }
+            packet = [];
+            link = 0;
+            return false;
+        }
 
-        /// For tests: cuts the link the way a network failure would, for good if asked to.
+        /// For tests: cuts every link the way a network failure would. A player who
+        /// joined stops dialling too when it is for good.
         public void Cut(bool forGood)
         {
-            SteamNetworkingSockets.CloseConnection(connection, CloseReason, null, false);
-            Lose();
+            foreach (var connection in links.Keys.ToList())
+            {
+                SteamNetworkingSockets.CloseConnection(connection, CloseReason, null, false);
+                Lose(connection);
+            }
             dialling = !forGood;
         }
 
         public void Dispose()
         {
             statusChanged.Dispose();
-            if (connection != HSteamNetConnection.Invalid)
+            foreach (var connection in links.Keys)
             {
                 SteamNetworkingSockets.CloseConnection(connection, CloseReason, null, false);
             }
-            if (listener != HSteamListenSocket.Invalid)
+            if (IsHost)
             {
                 SteamNetworkingSockets.CloseListenSocket(listener);
             }

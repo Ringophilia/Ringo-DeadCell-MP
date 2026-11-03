@@ -6,21 +6,20 @@ namespace RingoMP.Net
     {
         public bool Connected => false;
 
+        public IReadOnlyCollection<int> Links => [];
+
         public void Update(double dt)
         {
         }
 
-        public void SendReliable(byte[] packet)
+        public void Send(int link, byte[] packet, bool reliable)
         {
         }
 
-        public void SendUnreliable(byte[] packet)
-        {
-        }
-
-        public bool TryReceive(out byte[] packet)
+        public bool TryReceive(out byte[] packet, out int link)
         {
             packet = [];
+            link = 0;
             return false;
         }
 

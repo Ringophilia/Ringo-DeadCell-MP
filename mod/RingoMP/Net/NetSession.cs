@@ -9,14 +9,17 @@ namespace RingoMP.Net
 {
     public enum NetRole { Host, Client }
 
-    /// Keeps two games in step. The host owns mobs: where they are, their life and
-    /// their death. Each player owns their own hero. A client's mobs are puppets,
-    /// and its hits on them only show; the real ones come from its RemoteHero
+    /// Keeps up to four games in step. The host owns mobs: where they are, their life
+    /// and their death. Each player owns their own hero. The others' mobs are puppets,
+    /// and their hits on them only show; the real ones come from their RemoteHeroes
     /// replaying the same inputs on the host.
+    /// Every player links to the host alone, and the host passes on what each one says
+    /// about themselves to the others, so that everyone sees everyone.
     /// A session lives as long as the game does. Alone it just watches, so a friend
     /// can join at any moment: same seed, same levels, straight to where the host is.
     public sealed class NetSession
     {
+        public const int MaxPlayers = 4;
         const double HeroSendSeconds = 1.0 / 30;
         const double MobSendSeconds = 1.0 / 15;
         const double PuppetAiLockSeconds = 100000;
@@ -24,21 +27,55 @@ namespace RingoMP.Net
         const double EliteLifeScale = 1.7;
         const double BossLifeScale = 1.8;
         const int MobSyncRangeCells = 60;
+        const double RetireSeconds = 1;
+
+        /// Another player, as this game knows them.
+        sealed class Peer(int slot)
+        {
+            public readonly int Slot = slot;
+            public (byte Number, byte Room, string Id)? Arrival;
+            public readonly Dictionary<(byte Number, byte Room), ulong> Signatures = [];
+            public readonly Dictionary<byte, string> Levels = [];
+            public ulong SteamId;
+            public bool Up;
+            public bool EverUp;
+            public double DownSeconds;
+            public bool ContentsSent;
+        }
+
+        // What a player says about themselves, which the host passes on to the others.
+        static readonly HashSet<PacketType> Relayed =
+        [
+            PacketType.HeroState, PacketType.LevelReady, PacketType.ExitWait, PacketType.Rescue, PacketType.TeamWipe,
+            PacketType.ItemTaken, PacketType.ItemPlaced, PacketType.Look, PacketType.Progress, PacketType.LoadoutSaved,
+        ];
+
+        // Said once and true until said again, so a player who joins later hears it from the host.
+        static readonly HashSet<PacketType> Remembered =
+        [
+            PacketType.LevelReady, PacketType.Look, PacketType.Progress, PacketType.LoadoutSaved,
+        ];
 
         readonly CoopSession coop;
         readonly ILogger log;
         readonly Dictionary<Mob, bool> dead = new(ReferenceEqualityComparer.Instance);
         readonly Dictionary<ushort, string> lastAnims = [];
-        readonly Dictionary<(byte Number, byte Room), ulong> peerSignatures = [];
         readonly Dictionary<byte, string> runLevels = [];
-        readonly Dictionary<byte, string> peerLevels = [];
-        readonly HashSet<Mob> scaledMobs = new(ReferenceEqualityComparer.Instance);
+        readonly SortedDictionary<int, Peer> peers = [];
+        readonly Dictionary<(int Slot, PacketType Type), byte[]> remembered = [];
+        // Links of players who left or were sent away, ignored until they close.
+        readonly HashSet<int> dropped = [];
+        readonly Dictionary<ulong, byte[]> savedLoadouts = [];
+        // How much stronger each mob was made for the players there were at the time.
+        readonly Dictionary<Mob, double> mobScales = new(ReferenceEqualityComparer.Instance);
         ITransport transport;
+        // A link that was left still runs a moment, so that the goodbye goes out.
+        ITransport? retiring;
+        double retiringFor;
         Game? trackedGame;
         bool routeFound;
         double heroTimer;
         double mobTimer;
-        (byte Number, byte Room, string Id)? peerArrival;
         Level? trackedLevel;
         Game? runGame;
         byte levelNumber;
@@ -53,34 +90,33 @@ namespace RingoMP.Net
         bool signatureSent;
         bool allowDeath;
         bool itemsTracked;
-        bool linkUp;
         bool everLinked;
         bool launching;
         bool hostInRun;
         bool saidWaiting;
-        bool contentsSent;
         int? seedTold;
         bool? runTold;
+        RunMode? modeTold;
         int? startedSeed;
-        ulong peerId;
-        byte[]? savedLoadout;
-        ulong savedLoadoutOwner;
+        RunMode hostMode;
+        bool savingScore;
+        int ownSlot;
+        double joinWait;
         byte[]? loadoutToRestore;
-        double downSeconds;
 
         public NetRole Role { get; private set; }
 
-        /// How long a lost partner has to come back before they count as gone.
+        /// How long a lost player has to come back before they count as gone.
         public double GiveUpSeconds { get; set; } = 60;
 
-        /// The link went down and may yet come back.
-        public bool LinkDown => everLinked && !linkUp && !PeerLeft;
+        /// A link went down and may yet come back.
+        public bool LinkDown => everLinked && !PeerLeft && peers.Values.Any(p => Direct(p) && !p.Up);
 
-        /// The partner is gone for good and this player goes on alone.
+        /// Everyone else is gone for good and this player goes on alone.
         public bool PeerLeft { get; private set; }
 
         /// Players start runs from the title screen rather than a test: whatever the
-        /// host starts, the client joins, and the client cannot start one by itself.
+        /// host starts, the others join, and they cannot start one by themselves.
         public bool HostLeadsStart { get; init; }
 
         /// Says why an attempt to start was refused.
@@ -92,8 +128,17 @@ namespace RingoMP.Net
         public ITransport Transport => transport;
         public int? Seed { get; private set; }
         public MobRegistry? Registry { get; private set; }
-        public bool LevelsMatch => Registry != null && peerArrival is { } arrival && arrival.Number == levelNumber && arrival.Room == room
-            && peerSignatures.TryGetValue((levelNumber, room), out var peer) && peer == Registry.Signature;
+
+        /// A player who joined matches the host; the host matches everyone.
+        public bool LevelsMatch => Role == NetRole.Client
+            ? peers.TryGetValue(SteamTransport.HostLink, out var host) && Matches(host)
+            : peers.Count > 0 && peers.Values.All(Matches);
+
+        /// Which player this is: the host is 0, the others are numbered as they joined.
+        public int Slot => Role == NetRole.Host ? SteamTransport.HostLink : ownSlot;
+
+        /// Everyone in the session, this player included.
+        public int Players => 1 + peers.Count;
 
         /// In a side room rather than the level itself, for tests to follow along.
         public bool InSideRoom => room != 0;
@@ -106,8 +151,18 @@ namespace RingoMP.Net
         public SessionProgress Progress { get; }
         public PartnerLook Look { get; }
 
-        /// A run can start: the seed and both players' progress are known.
+        /// The kind of run the host is in or last started, which the others start too.
+        public RunMode Mode => hostMode;
+
+        /// Someone else has been part of this session since the last run began alone.
+        public bool PlayedTogether => everLinked;
+
+        /// A run can start: the seed and everyone's progress are known.
         public bool ReadyToStart => Seed != null && Progress.Ready;
+
+        /// For tests: games sharing one install must not load their saves at the same
+        /// moment, as the mod framework writes one config file then.
+        public Func<double>? JoinRunDelay { get; set; }
 
         /// Supplies the local player's held actions as a bit mask.
         public Func<ulong> ReadLocalInput { get; set; } = RealInput.Read;
@@ -132,59 +187,88 @@ namespace RingoMP.Net
                 Seed = hostSeed;
             }
 
-            Hook_User.newGame += (orig, self, seed, data, a, b, mode) => orig(self, NextRunSeed() ?? seed, data, a, b, mode);
+            // The daily challenge is the same for everyone that day, so its seed stays.
+            Hook_User.newGame += (orig, self, seed, data, a, b, mode) =>
+                orig(self, Role == NetRole.Host && mode is LaunchMode.NewScoringGame ? seed : NextRunSeed() ?? seed, data, a, b, mode);
+            // A run played together is nobody's own score. Only the end screen is told so:
+            // asked at the start, the game would hold the run up with a warning about Steam.
+            dc.ui.Hook_EndScoreMode.saveScore += (orig, self) =>
+            {
+                savingScore = true;
+                orig(self);
+                savingScore = false;
+            };
+            dc.tool.Hook__ServerApi.canSaveScore += orig => !(savingScore && PlayedTogether) && orig();
             Hook_Mob.tryToPreventDeath += OnMobTryToPreventDeath;
             Hook_Mob.onDie += OnMobDie;
             coop.RemoteHit = OnRemoteHit;
-            // Two players hit twice as hard, and mob damage stays: two heroes have the life of one each.
+            // More players hit harder, and mob damage stays: each hero has the life of one.
             Hook_Mob.initLife += OnMobInitLife;
-            Progress = new SessionProgress(log);
+            Progress = new SessionProgress(log, () => peers.Keys);
             Look = new PartnerLook(log);
             Items = new SharedItems(log, SendForLevel);
-            Life = new TeamLife(coop, log, SendForLevel, () => ReadLocalInput());
+            Life = new TeamLife(coop, log, SendForLevel, () => ReadLocalInput(), () => Slot);
             Gathering = new ExitGathering(coop, () => Role, log, SendForLevel, () => !PeerLeft, Life);
             Hook_Main.launchGame += OnLaunch;
         }
 
         void OnMobInitLife(Hook_Mob.orig_initLife orig, Mob self, double life, int? extra)
         {
-            if (!transport.Connected)
+            if (peers.Count == 0)
             {
                 orig(self, life, extra);
                 return;
             }
-            orig(self, life * LifeScale(self), extra);
-            scaledMobs.Add(self);
+            var factor = TeamFactor(self);
+            orig(self, life * factor, extra);
+            mobScales[self] = factor;
         }
 
-        /// Mobs made for one player get stronger when a second one turns up, and
-        /// weaker again when that player is gone for good.
-        void ScaleMobs(bool together)
+        /// Mobs made for fewer players get stronger when another one turns up, and
+        /// weaker again when one is gone for good.
+        void ScaleMobs()
         {
             foreach (var mob in Registry?.Mobs ?? [])
             {
-                if (mob.destroyed || mob.life <= 0 || scaledMobs.Contains(mob) == together)
+                if (mob.destroyed || mob.life <= 0)
                 {
                     continue;
                 }
-                var factor = together ? LifeScale(mob) : 1 / LifeScale(mob);
+                var applied = mobScales.GetValueOrDefault(mob, 1);
+                var wanted = TeamFactor(mob);
+                if (wanted == applied)
+                {
+                    continue;
+                }
+                var factor = wanted / applied;
                 mob.maxLife = (int)System.Math.Round(mob.maxLife * factor);
                 mob.life = System.Math.Max(1, (int)System.Math.Round(mob.life * factor));
-                if (together)
-                {
-                    scaledMobs.Add(mob);
-                }
-                else
-                {
-                    scaledMobs.Remove(mob);
-                }
+                mobScales[mob] = wanted;
             }
         }
 
+        double TeamFactor(Mob mob) => 1 + (LifeScale(mob) - 1) * peers.Count;
+
         static ulong OwnId => Steamworks.SteamAPI.IsSteamRunning() ? Steamworks.SteamUser.GetSteamID().m_SteamID : 0;
 
-        /// Each run needs its own levels. The host picks them; a client takes what it was told.
+        /// Each run needs its own levels. The host picks them; the others take what they were told.
         int? NextRunSeed() => Role == NetRole.Host ? Seed + runsStarted++ : Seed;
+
+        /// The host links to everyone; the others only to the host.
+        bool Direct(Peer peer) => Role == NetRole.Host || peer.Slot == SteamTransport.HostLink;
+
+        bool Matches(Peer peer) => Registry != null && peer.Arrival is { } arrival && arrival.Number == levelNumber && arrival.Room == room
+            && peer.Signatures.TryGetValue((levelNumber, room), out var signature) && signature == Registry.Signature;
+
+        Peer PeerFor(int slot)
+        {
+            if (!peers.TryGetValue(slot, out var peer))
+            {
+                peer = new Peer(slot);
+                peers[slot] = peer;
+            }
+            return peer;
+        }
 
         /// Puts this session on a new link: a room was opened or joined.
         public void Attach(ITransport link, NetRole role)
@@ -199,7 +283,7 @@ namespace RingoMP.Net
             ForgetLink();
         }
 
-        /// Back to being alone, with the partner informed.
+        /// Back to being alone, with the others informed.
         public void Leave()
         {
             transport.SendReliable(Packet.Build(PacketType.Bye, _ => { }));
@@ -208,10 +292,14 @@ namespace RingoMP.Net
         }
 
         /// The host's decision; the room's owner sends this player away.
-        public void Kick()
+        public void Kick(ulong player)
         {
-            transport.SendReliable(Packet.Build(PacketType.Kicked, _ => { }));
-            GoOnAlone();
+            foreach (var peer in peers.Values.Where(p => p.SteamId == player && Direct(p)).ToList())
+            {
+                transport.Send(peer.Slot, Packet.Build(PacketType.Kicked, _ => { }), true);
+                dropped.Add(peer.Slot);
+                DropPeer(peer.Slot);
+            }
         }
 
         /// The room says the host is gone before the link gives up on it.
@@ -226,22 +314,42 @@ namespace RingoMP.Net
 
         void Detach()
         {
-            transport.Dispose();
+            retiring?.Dispose();
+            retiring = transport;
+            retiringFor = 0;
             transport = new IdleTransport();
             ForgetLink();
         }
 
+        void UpdateRetiring(double dt)
+        {
+            if (retiring == null)
+            {
+                return;
+            }
+            retiring.Update(dt);
+            while (retiring.TryReceive(out _, out _))
+            {
+            }
+            retiringFor += dt;
+            if (retiringFor >= RetireSeconds)
+            {
+                retiring.Dispose();
+                retiring = null;
+            }
+        }
+
         void ForgetLink()
         {
-            linkUp = false;
             everLinked = false;
-            downSeconds = 0;
             PeerLeft = false;
-            peerArrival = null;
-            peerSignatures.Clear();
-            peerLevels.Clear();
+            peers.Clear();
+            remembered.Clear();
+            dropped.Clear();
+            ownSlot = 0;
             seedTold = null;
             runTold = null;
+            modeTold = null;
             hostInRun = false;
             Progress.NewLink();
             Look.NewLink();
@@ -264,6 +372,11 @@ namespace RingoMP.Net
                     return;
                 }
             }
+            if (Role == NetRole.Host)
+            {
+                hostMode = RunMode.From(mode);
+                log.Information("RINGO starting a {k} run", hostMode.Kind);
+            }
             orig(self, mode, a, b);
         }
 
@@ -277,14 +390,16 @@ namespace RingoMP.Net
             var game = Game.Class.ME;
             var inRun = game?.data != null;
             var seed = inRun ? game!.data.gameSeed : Seed! + runsStarted;
-            if (seed != seedTold || inRun != runTold)
+            if (seed != seedTold || inRun != runTold || hostMode != modeTold)
             {
                 seedTold = seed;
                 runTold = inRun;
+                modeTold = hostMode;
                 transport.SendReliable(Packet.Build(PacketType.Hello, w =>
                 {
                     w.Write(seed!.Value);
                     w.Write(inRun);
+                    hostMode.Write(w);
                 }));
             }
         }
@@ -293,85 +408,115 @@ namespace RingoMP.Net
         {
             Seed = reader.ReadInt32();
             hostInRun = reader.ReadBoolean();
-            log.Information("RINGO host seed {s}, in a run={r}", Seed, hostInRun);
+            hostMode = RunMode.Read(reader);
+            log.Information("RINGO host seed {s}, in a run={r}, {k}", Seed, hostInRun, hostMode.Kind);
             if (hostInRun && Game.Class.ME == null)
             {
                 Progress.JoiningRun = true;
             }
         }
 
-        /// Whatever the host started, the client joins; the same goes for coming back after a crash.
-        void JoinRun()
+        /// Whatever the host started, the others join; the same goes for coming back after a crash.
+        void JoinRun(double dt)
         {
             if (!HostLeadsStart || Role != NetRole.Client || !hostInRun || !Progress.Ready || Seed == startedSeed)
             {
+                joinWait = 0;
                 return;
             }
             var atTitle = Main.Class.ME?.curProcess is TitleScreen;
-            if (atTitle || Life.Wiped)
+            // The host can also start a new run from inside one, through the Boss Rush door for one.
+            var otherRun = Game.Class.ME?.data is { } data && data.gameSeed != Seed && !Gathering.InTransit;
+            if (atTitle || Life.Wiped || otherRun)
             {
-                log.Information("RINGO joining the host's run, seed {s}", Seed);
+                joinWait += dt;
+                if (joinWait < (JoinRunDelay?.Invoke() ?? 0))
+                {
+                    return;
+                }
+                log.Information("RINGO joining the host's {k} run, seed {s}", hostMode.Kind, Seed);
                 startedSeed = Seed;
                 launching = true;
-                Main.Class.ME!.launchGame(new LaunchMode.NewGame(false, false), null, null);
+                Main.Class.ME!.launchGame(hostMode.ToLaunch(), null, null);
                 launching = false;
             }
         }
 
-        void TrackLink(double dt)
+        void TrackLinks(double dt)
         {
-            if (transport.Connected)
+            var links = transport.Links;
+            dropped.RemoveWhere(link => !links.Contains(link));
+            foreach (var link in links.Where(l => !dropped.Contains(l)).ToList())
             {
-                if (!linkUp)
+                var peer = PeerFor(link);
+                peer.DownSeconds = 0;
+                if (!peer.Up)
                 {
-                    linkUp = true;
-                    OnLinkUp();
+                    peer.Up = true;
+                    OnLinkUp(peer);
                 }
-                downSeconds = 0;
-                return;
             }
-            if (linkUp)
+            foreach (var peer in peers.Values.Where(p => p.Up && !links.Contains(p.Slot)).ToList())
             {
-                linkUp = false;
-                OnLinkLost();
+                peer.Up = false;
+                OnLinkLost(peer);
             }
-            if (LinkDown)
+            foreach (var peer in peers.Values.Where(p => Direct(p) && !p.Up).ToList())
             {
-                downSeconds += dt;
-                if (downSeconds >= GiveUpSeconds)
+                peer.DownSeconds += dt;
+                if (peer.DownSeconds < GiveUpSeconds)
                 {
-                    log.Information("RINGO the partner is gone, going on alone");
+                    continue;
+                }
+                if (Role == NetRole.Client)
+                {
+                    log.Information("RINGO the host is gone, going on alone");
                     GoOnAlone();
+                    return;
                 }
+                log.Information("RINGO player {p} is gone", peer.Slot);
+                DropPeer(peer.Slot);
             }
         }
 
-        void OnLinkLost()
+        void OnLinkLost(Peer peer)
         {
-            log.Information("RINGO the link to the partner is down");
-            Gathering.Reset();
+            log.Information("RINGO the link to player {p} is down", peer.Slot);
             // Mobs must not waste their attention on a hero nobody controls right now.
-            coop.Remote?.set_targetable(false);
+            // The host's link carries everyone else's heroes too.
+            foreach (var remote in coop.Remotes.Values.Where(r => Role == NetRole.Client || r.Slot == peer.Slot))
+            {
+                remote.set_targetable(false);
+            }
+            if (Role == NetRole.Client)
+            {
+                Gathering.Reset();
+            }
+            else
+            {
+                Gathering.ForgetPeer(peer.Slot);
+            }
             Notice.Say(Phrase.LinkLost);
         }
 
         /// What travelled while the link was down is lost, so each side says again
         /// where it stands. Hero and mob states are sent all the time anyway.
-        void OnLinkUp()
+        void OnLinkUp(Peer peer)
         {
-            var cameBack = everLinked;
-            log.Information("RINGO the link is up after {s:0.0}s, came back={b}", downSeconds, cameBack);
+            var cameBack = peer.EverUp;
+            log.Information("RINGO the link to player {p} is up after {s:0.0}s, came back={b}", peer.Slot, peer.DownSeconds, cameBack);
+            peer.EverUp = true;
             everLinked = true;
             PeerLeft = false;
             seedTold = null;
             runTold = null;
             signatureSent = false;
-            peerSignatures.Remove((levelNumber, room));
-            Progress.NewLink();
+            peer.Signatures.Remove((levelNumber, room));
+            Progress.NewLink(Role == NetRole.Host ? peer.Slot : null);
             Look.NewLink();
-            if (coop.Remote is { } remote)
+            foreach (var remote in coop.Remotes.Values.Where(r => Role == NetRole.Client || r.Slot == peer.Slot))
             {
-                remote.set_targetable(!remote.Downed);
+                remote.set_targetable(!remote.Downed && !remote.Away);
             }
             if (Role == NetRole.Client)
             {
@@ -385,36 +530,82 @@ namespace RingoMP.Net
             Notice.Say(cameBack ? Phrase.LinkBack : Phrase.PartnerHere);
         }
 
-        /// A player who comes back gets what they carried when they entered their last level.
-        void OnJoin(BinaryReader reader)
+        /// A player who joins hears who they are and what the others said so far. One
+        /// who comes back gets what they carried when they entered their last level.
+        void OnJoin(int slot, BinaryReader reader)
         {
             var fresh = reader.ReadBoolean();
-            peerId = reader.ReadUInt64();
+            var id = reader.ReadUInt64();
+            var peer = PeerFor(slot);
+            peer.SteamId = id;
             Joins++;
-            log.Information("RINGO a player joined, fresh={f}", fresh);
+            log.Information("RINGO player {p} joined, fresh={f}", slot, fresh);
+            // Someone back under another number leaves the old one behind.
+            foreach (var old in peers.Values.Where(p => p.Slot != slot && p.SteamId == id && id != 0 && !p.Up).ToList())
+            {
+                DropPeer(old.Slot);
+            }
             // Someone quick to restart replaces the old link before it has timed out,
             // so the link may never have looked down. They still need to hear everything.
             seedTold = null;
             runTold = null;
             signatureSent = false;
-            peerSignatures.Remove((levelNumber, room));
-            Progress.NewLink();
+            peer.Signatures.Remove((levelNumber, room));
+            Progress.NewLink(slot);
             Look.NewLink();
-            if (fresh && savedLoadout != null && savedLoadoutOwner == peerId)
+            transport.Send(slot, Packet.Build(PacketType.Welcome, w => w.Write((byte)slot)), true);
+            foreach (var ((from, _), packet) in remembered.Where(r => r.Key.Slot != slot).ToList())
             {
-                var loadout = savedLoadout;
-                transport.SendReliable(Packet.Build(PacketType.LoadoutBack, w => w.Write(loadout)));
+                transport.Send(slot, RelayPacket(from, packet), true);
+            }
+            if (fresh && savedLoadouts.TryGetValue(id, out var loadout))
+            {
+                transport.Send(slot, Packet.Build(PacketType.LoadoutBack, w => w.Write(loadout)), true);
             }
         }
 
-        /// The one who stays goes on alone. A client has only puppets, so it takes the
-        /// mobs over, and the room with them: the other player may come back to it.
+        /// A player is gone: their hero goes, and the others hear of it.
+        void DropPeer(int slot)
+        {
+            if (!peers.Remove(slot))
+            {
+                return;
+            }
+            log.Information("RINGO player {p} left the session", slot);
+            coop.Remove(slot);
+            Life.ForgetPeer(slot);
+            Gathering.ForgetPeer(slot);
+            Progress.ForgetPeer(slot);
+            Look.ForgetPeer(slot);
+            foreach (var key in remembered.Keys.Where(k => k.Slot == slot).ToList())
+            {
+                remembered.Remove(key);
+            }
+            if (Role == NetRole.Host)
+            {
+                transport.SendReliable(Packet.Build(PacketType.PeerGone, w => w.Write((byte)slot)));
+            }
+            if (peers.Count == 0)
+            {
+                GoOnAlone();
+                return;
+            }
+            ScaleMobs();
+            Notice.Say(Phrase.PartnerLeft);
+        }
+
+        /// The one who stays goes on alone. A player who joined has only puppets, so it
+        /// takes the mobs over, and the room with them: the others may come back to it.
         void GoOnAlone()
         {
             PeerLeft = true;
-            peerArrival = null;
-            ScaleMobs(false);
-            coop.Remote?.destroy();
+            peers.Clear();
+            remembered.Clear();
+            ScaleMobs();
+            foreach (var slot in coop.Remotes.Keys.ToList())
+            {
+                coop.Remove(slot);
+            }
             coop.Forget();
             Life.Reset();
             Gathering.Reset();
@@ -449,10 +640,17 @@ namespace RingoMP.Net
             body(w);
         });
 
+        static byte[] RelayPacket(int slot, byte[] packet) => Packet.Build(PacketType.Relay, w =>
+        {
+            w.Write((byte)slot);
+            w.Write(packet);
+        });
+
         public void Update(double dt)
         {
+            UpdateRetiring(dt);
             transport.Update(dt);
-            TrackLink(dt);
+            TrackLinks(dt);
             SayHello();
             if (transport.Connected)
             {
@@ -464,11 +662,11 @@ namespace RingoMP.Net
             Receive();
             AnnounceReady();
             OfferContents();
-            JoinRun();
+            JoinRun(dt);
             FollowPeer();
             // A run's heroes end with its game, and the next run has a game of its own.
             var game = Game.Class.ME;
-            if (coop.Remote != null && !ReferenceEquals(game, runGame))
+            if (coop.Remotes.Count > 0 && !ReferenceEquals(game, runGame))
             {
                 log.Information("RINGO the run is over");
                 coop.Forget();
@@ -479,19 +677,18 @@ namespace RingoMP.Net
             {
                 return;
             }
-            if (coop.Remote == null && transport.Connected && LevelsMatch && CoopSession.CanSpawn(game) && !game.hasCinematic())
+            UpdateRemotes(game);
+            ScaleMobs();
+            TellWaiting();
+            if (!coop.Remotes.Values.Any(r => !r.Away))
             {
-                coop.Spawn(game);
-                runGame = game;
-            }
-            if (coop.Remote == null || !LevelsMatch)
-            {
-                TellWaiting();
                 return;
             }
             RestoreLoadout();
-            ScaleMobs(true);
-            Look.Update(coop.Remote);
+            foreach (var remote in coop.Remotes.Values)
+            {
+                Look.Update(remote);
+            }
             Life.Update(dt);
             Watch(game);
             Gathering.Update(dt);
@@ -513,12 +710,31 @@ namespace RingoMP.Net
             }
         }
 
+        /// A player's hero appears once they are in the same level as this one, and is
+        /// away while they are somewhere else.
+        void UpdateRemotes(Game game)
+        {
+            if (transport.Connected && CoopSession.CanSpawn(game) && !game.hasCinematic())
+            {
+                foreach (var peer in peers.Values.Where(p => !coop.Remotes.ContainsKey(p.Slot) && Matches(p)).ToList())
+                {
+                    coop.Spawn(game, peer.Slot);
+                    runGame = game;
+                }
+            }
+            foreach (var remote in coop.Remotes.Values)
+            {
+                remote.SetAway(!(peers.TryGetValue(remote.Slot, out var peer) && Matches(peer)));
+            }
+        }
+
         /// A save continued by the host has a level whose mobs are partly gone, which
         /// no other game can rebuild. The players meet in the next one instead.
         void TellWaiting()
         {
-            if (!saidWaiting && Role == NetRole.Client && peerArrival is { } arrival && arrival.Number == levelNumber && arrival.Room == room
-                && peerSignatures.ContainsKey((levelNumber, room)) && Registry != null && !LevelsMatch)
+            if (!saidWaiting && Role == NetRole.Client && peers.TryGetValue(SteamTransport.HostLink, out var host)
+                && host.Arrival is { } arrival && arrival.Number == levelNumber && arrival.Room == room
+                && host.Signatures.ContainsKey((levelNumber, room)) && Registry != null && !Matches(host))
             {
                 saidWaiting = true;
                 Notice.Say(Phrase.MeetInNextLevel);
@@ -563,7 +779,10 @@ namespace RingoMP.Net
                 // Someone joining heard the host's way before their first level.
                 if (trackedGame != null)
                 {
-                    peerLevels.Clear();
+                    foreach (var peer in peers.Values)
+                    {
+                        peer.Levels.Clear();
+                    }
                 }
                 trackedGame = game;
                 runLevels.Clear();
@@ -582,8 +801,14 @@ namespace RingoMP.Net
             roomRegistries.Clear();
             RememberRooms(game, level);
             runLevels[levelNumber] = CurrentLevelId(game);
-            contentsSent = false;
-            scaledMobs.RemoveWhere(m => m.destroyed);
+            foreach (var peer in peers.Values)
+            {
+                peer.ContentsSent = false;
+            }
+            foreach (var mob in mobScales.Keys.Where(m => m.destroyed).ToList())
+            {
+                mobScales.Remove(mob);
+            }
             signatureSent = false;
             itemsTracked = false;
             saidWaiting = false;
@@ -631,7 +856,10 @@ namespace RingoMP.Net
         {
             trackedLevel = level;
             room = ReferenceEquals(level, roomsMain) ? (byte)0 : (byte)(RoomIndex(game, level) + 1);
-            contentsSent = false;
+            foreach (var peer in peers.Values)
+            {
+                peer.ContentsSent = false;
+            }
             signatureSent = false;
             itemsTracked = false;
             saidWaiting = false;
@@ -684,7 +912,7 @@ namespace RingoMP.Net
             return way;
         }
 
-        /// Only once the hero is in the level, so the other game waits for a player who is really there.
+        /// Only once the hero is in the level, so the other games wait for a player who is really there.
         void AnnounceReady()
         {
             var game = Game.Class.ME;
@@ -709,7 +937,7 @@ namespace RingoMP.Net
                     w.Write(id);
                 }
             });
-            // Both keep the other's gear: whoever stays may end up hosting the one who comes back.
+            // Everyone keeps everyone's gear: whoever stays may end up hosting the one who comes back.
             if (loadoutToRestore == null)
             {
                 SaveLoadoutNow();
@@ -723,26 +951,32 @@ namespace RingoMP.Net
         });
 
         /// The same level that does not match: the host tells what is in its own, and
-        /// the client may find it holds just the same and more.
+        /// the other player may find it holds just the same and more.
         void OfferContents()
         {
-            if (Role != NetRole.Host || contentsSent || Registry == null || Game.Class.ME is not { } game
-                || peerArrival is not { } arrival || arrival.Number != levelNumber || arrival.Room != room || arrival.Id != CurrentLevelId(game)
-                || !peerSignatures.ContainsKey((levelNumber, room)) || LevelsMatch)
+            if (Role != NetRole.Host || Registry == null || Game.Class.ME is not { } game)
             {
                 return;
             }
-            contentsSent = true;
-            var keys = Registry.Keys;
-            log.Information("RINGO the partner's level differs, sending its {n} contents", keys.Count);
-            SendForLevel(PacketType.LevelContents, w =>
+            foreach (var peer in peers.Values)
             {
-                w.Write(keys.Count);
-                foreach (var key in keys)
+                if (peer.ContentsSent || peer.Arrival is not { } arrival || arrival.Number != levelNumber || arrival.Room != room
+                    || arrival.Id != CurrentLevelId(game) || !peer.Signatures.ContainsKey((levelNumber, room)) || Matches(peer))
                 {
-                    w.Write(key);
+                    continue;
                 }
-            });
+                peer.ContentsSent = true;
+                var keys = Registry.Keys;
+                log.Information("RINGO player {p}'s level differs, sending its {n} contents", peer.Slot, keys.Count);
+                transport.Send(peer.Slot, LevelPacket(PacketType.LevelContents, w =>
+                {
+                    w.Write(keys.Count);
+                    foreach (var key in keys)
+                    {
+                        w.Write(key);
+                    }
+                }), true);
+            }
         }
 
         void OnContents(BinaryReader reader)
@@ -773,19 +1007,19 @@ namespace RingoMP.Net
                 Registry.Mobs.Count, Registry.Signature, LevelsMatch);
         }
 
-        /// A player who is down watches their partner fight on.
+        /// A player who is down watches someone else fight on.
         void Watch(Game game)
         {
             if (game.curLevel?.viewport is not { } viewport)
             {
                 return;
             }
-            var remote = coop.Remote;
-            var watchPartner = Life.Local != DownState.Standing && remote is { Downed: false, _level: not null };
-            Entity target = watchPartner ? remote! : game.hero;
+            var standing = coop.Remotes.Values.FirstOrDefault(r => !r.Downed && !r.Away && r._level != null);
+            var watchOther = Life.Local != DownState.Standing && standing != null;
+            Entity target = watchOther ? standing! : game.hero;
             var tracked = viewport.tracked;
             // A cinematic points the camera somewhere else, and keeps it.
-            if (!ReferenceEquals(tracked, target) && (ReferenceEquals(tracked, game.hero) || ReferenceEquals(tracked, remote)))
+            if (!ReferenceEquals(tracked, target) && (ReferenceEquals(tracked, game.hero) || tracked is RemoteHero))
             {
                 viewport.track(target, null);
             }
@@ -793,14 +1027,14 @@ namespace RingoMP.Net
 
         static string CurrentLevelId(Game game) => game.curLevel.map.infos.id.ToString();
 
-        /// What happened in this level before the partner got here, or while they were away.
+        /// What happened in this level before a player got here, or while they were away.
         void ReplayLevel()
         {
             if (Role == NetRole.Host && Registry != null)
             {
                 // The list itself knows best: mobs can also end without ever calling onDie.
                 var gone = Registry.Mobs.Where(m => m.destroyed || m.life <= 0).ToList();
-                log.Information("RINGO telling the partner about {n} dead mobs", gone.Count);
+                log.Information("RINGO telling the others about {n} dead mobs", gone.Count);
                 foreach (var mob in gone)
                 {
                     Registry.TryGetIndex(mob, out var index);
@@ -814,42 +1048,60 @@ namespace RingoMP.Net
             Items.Replay();
         }
 
-        /// Doors gather both players, but a level also ends in falls and hidden
-        /// passages that one player takes alone. The other one follows. Someone joining
-        /// a run does the same from its first level, however far along the host is.
+        /// Doors gather everyone, but a level also ends in falls and hidden passages
+        /// that one player takes alone. The others follow whoever is furthest ahead.
+        /// Someone joining a run does the same from its first level, however far along
+        /// the host is.
         void FollowPeer()
         {
             var game = Game.Class.ME;
-            if (peerArrival is not { } arrival || LinkDown || !transport.Connected || Gathering.InTransit || Life.Wiped
+            if (peers.Count == 0 || LinkDown || !transport.Connected || Gathering.InTransit || Life.Wiped
                 || !CoopSession.CanSpawn(game) || game!.hasCinematic())
             {
                 return;
             }
+            // A player still in another run than the host's is on its way to the host's run instead.
+            if (Role == NetRole.Client && game.data?.gameSeed != Seed)
+            {
+                return;
+            }
             FindRoute(game);
-            var ahead = (sbyte)(arrival.Number - levelNumber) > 0;
-            // Side rooms are entered together through their doors. A partner in one
+            Peer? leader = null;
+            foreach (var peer in peers.Values)
+            {
+                if (peer.Arrival is { } a && (sbyte)(a.Number - levelNumber) > 0
+                    && (leader == null || (sbyte)(a.Number - leader.Arrival!.Value.Number) > 0))
+                {
+                    leader = peer;
+                }
+            }
+            var ahead = leader != null;
+            // Side rooms are entered together through their doors. A player in one
             // comes back out of it; nobody follows them in.
-            var elsewhere = Role == NetRole.Client && arrival.Number == levelNumber && arrival.Room == 0 && room == 0
-                && arrival.Id != CurrentLevelId(game);
-            if (!ahead && !elsewhere)
+            if (!ahead && Role == NetRole.Client && peers.TryGetValue(SteamTransport.HostLink, out var host)
+                && host.Arrival is { } h && h.Number == levelNumber && h.Room == 0 && room == 0 && h.Id != CurrentLevelId(game))
+            {
+                leader = host;
+            }
+            if (leader?.Arrival is not { } arrival)
             {
                 return;
             }
             // A level's content depends on the way there, so the way is walked level by level.
-            var known = peerLevels.Keys.Where(n => (sbyte)(n - levelNumber) > 0).OrderBy(n => (sbyte)(n - levelNumber)).ToList();
+            var known = leader.Levels.Keys.Where(n => (sbyte)(n - levelNumber) > 0).OrderBy(n => (sbyte)(n - levelNumber)).ToList();
             byte next;
             string id;
             if (ahead && known.Count > 0)
             {
                 next = known[0];
-                id = peerLevels[next];
-                log.Information("RINGO following the other player's way, {id} of {last}", id, arrival.Id);
+                id = leader.Levels[next];
+                log.Information("RINGO following player {p}'s way, {id} of {last}", leader.Slot, id, arrival.Id);
             }
             else if (arrival.Room == 0)
             {
                 id = arrival.Id;
                 next = arrival.Number;
-                log.Information("RINGO following the other player to {id}", id);
+                log.Information("RINGO following player {p} to {id}", leader.Slot, id);
             }
             else
             {
@@ -864,13 +1116,13 @@ namespace RingoMP.Net
         /// stands. Finding their level on the host's way tells which number it has there.
         void FindRoute(Game game)
         {
-            if (routeFound || peerLevels.Count == 0)
+            if (routeFound || Role != NetRole.Client || !peers.TryGetValue(SteamTransport.HostLink, out var host) || host.Levels.Count == 0)
             {
                 return;
             }
             routeFound = true;
             var here = CurrentLevelId(game);
-            foreach (var (number, id) in peerLevels.OrderBy(l => l.Key))
+            foreach (var (number, id) in host.Levels.OrderBy(l => l.Key))
             {
                 if (id == here)
                 {
@@ -886,7 +1138,7 @@ namespace RingoMP.Net
             var state = new HeroStateData
             {
                 // Interacting is the owner's business: doors go through the gathering,
-                // and a replay must not open anything in the other player's world.
+                // and a replay must not open anything in another player's world.
                 Held = ReadLocalInput() & ~(1UL << HeroAction.Interact),
                 Down = Life.Local,
                 Cx = hero.cx,
@@ -904,9 +1156,8 @@ namespace RingoMP.Net
         void SendMobs()
         {
             // A level holds well over a hundred mobs, and most are nowhere near anyone.
-            var main = Game.Class.ME.hero;
-            var remote = coop.Remote!;
-            var alive = Registry!.Mobs.Where(m => !m.destroyed && m.life > 0 && (Near(m, main) || Near(m, remote))).ToList();
+            var heroes = coop.Remotes.Values.Where(r => !r.Away).Cast<Hero>().Append(Game.Class.ME.hero).ToList();
+            var alive = Registry!.Mobs.Where(m => !m.destroyed && m.life > 0 && heroes.Any(h => Near(m, h))).ToList();
             var packet = LevelPacket(PacketType.MobStates, w =>
             {
                 w.Write((ushort)alive.Count);
@@ -966,20 +1217,27 @@ namespace RingoMP.Net
         }
 
         /// Handles what is about the session rather than a level. True when it was that.
-        bool ReceiveOutsideLevels(PacketType type, BinaryReader reader)
+        bool ReceiveOutsideLevels(int slot, PacketType type, BinaryReader reader)
         {
+            var fromHost = Role == NetRole.Client && slot == SteamTransport.HostLink;
             switch (type)
             {
                 case PacketType.Hello:
-                    OnHello(reader);
+                    if (fromHost)
+                    {
+                        OnHello(reader);
+                    }
                     return true;
 
                 case PacketType.Progress:
-                    Progress.OnPeerProgress(reader);
+                    Progress.OnPeerProgress(slot, reader);
                     return true;
 
                 case PacketType.Join:
-                    OnJoin(reader);
+                    if (Role == NetRole.Host)
+                    {
+                        OnJoin(slot, reader);
+                    }
                     return true;
 
                 case PacketType.LoadoutBack:
@@ -987,18 +1245,42 @@ namespace RingoMP.Net
                     return true;
 
                 case PacketType.Bye:
-                    log.Information("RINGO the partner left the room");
-                    GoOnAlone();
+                    if (Role == NetRole.Host)
+                    {
+                        dropped.Add(slot);
+                        DropPeer(slot);
+                    }
+                    else if (fromHost)
+                    {
+                        log.Information("RINGO the host left the room");
+                        GoOnAlone();
+                    }
                     return true;
 
                 case PacketType.Look:
-                    Look.OnLook(reader);
+                    Look.OnLook(slot, reader);
                     return true;
 
                 case PacketType.Kicked:
                     log.Information("RINGO the host removed this player from the room");
                     GoOnAlone();
                     KickedOut?.Invoke();
+                    return true;
+
+                case PacketType.Welcome:
+                    ownSlot = reader.ReadByte();
+                    log.Information("RINGO this is player {p}", ownSlot);
+                    return true;
+
+                case PacketType.PeerGone:
+                    var gone = reader.ReadByte();
+                    if (fromHost && gone != ownSlot)
+                    {
+                        DropPeer(gone);
+                    }
+                    return true;
+
+                case PacketType.Relay:
                     return true;
 
                 default:
@@ -1008,100 +1290,139 @@ namespace RingoMP.Net
 
         void Receive()
         {
-            while (transport.TryReceive(out var packet))
+            while (transport.TryReceive(out var packet, out var link))
             {
-                using var reader = new BinaryReader(new MemoryStream(packet));
-                var type = (PacketType)reader.ReadByte();
-                if (ReceiveOutsideLevels(type, reader))
+                if (packet.Length == 0 || (Role == NetRole.Host && dropped.Contains(link)))
                 {
                     continue;
                 }
-                var number = reader.ReadByte();
-                var peerRoom = reader.ReadByte();
-                // The other game may announce a level this one has not reached yet.
-                if (type == PacketType.LevelReady)
+                // The others' words reach a player who joined through the host, with their number.
+                if (Role == NetRole.Client && (PacketType)packet[0] == PacketType.Relay)
                 {
-                    peerSignatures[(number, peerRoom)] = reader.ReadUInt64();
-                    peerArrival = (number, peerRoom, reader.ReadString());
-                    for (var left = reader.ReadInt32(); left > 0; left--)
+                    if (packet.Length > 2)
                     {
-                        peerLevels[reader.ReadByte()] = reader.ReadString();
-                    }
-                    log.Information("RINGO peer level {l} room {r} {id} signature {s:x}, match={m}",
-                        number, peerRoom, peerArrival.Value.Id, peerSignatures[(number, peerRoom)], LevelsMatch);
-                    // Deaths name mobs by their place in the list, which must be the same list.
-                    if (number == levelNumber && peerRoom == room && LevelsMatch)
-                    {
-                        ReplayLevel();
+                        Handle(packet[1], packet[2..]);
                     }
                     continue;
                 }
-                if (number != levelNumber || peerRoom != room)
+                if (Role == NetRole.Host)
                 {
-                    continue;
+                    PassOn(link, packet);
                 }
-                switch (type)
+                Handle(Role == NetRole.Host ? link : SteamTransport.HostLink, packet);
+            }
+        }
+
+        /// The host tells the others what one player said about themselves.
+        void PassOn(int slot, byte[] packet)
+        {
+            var type = (PacketType)packet[0];
+            if (!Relayed.Contains(type))
+            {
+                return;
+            }
+            if (Remembered.Contains(type))
+            {
+                remembered[(slot, type)] = packet;
+            }
+            transport.SendAll(RelayPacket(slot, packet), type != PacketType.HeroState, slot);
+        }
+
+        void Handle(int slot, byte[] packet)
+        {
+            using var reader = new BinaryReader(new MemoryStream(packet));
+            var type = (PacketType)reader.ReadByte();
+            if (ReceiveOutsideLevels(slot, type, reader))
+            {
+                return;
+            }
+            var number = reader.ReadByte();
+            var peerRoom = reader.ReadByte();
+            var peer = PeerFor(slot);
+            var fromHost = Role == NetRole.Client && slot == SteamTransport.HostLink;
+            // Another game may announce a level this one has not reached yet.
+            if (type == PacketType.LevelReady)
+            {
+                peer.Signatures[(number, peerRoom)] = reader.ReadUInt64();
+                peer.Arrival = (number, peerRoom, reader.ReadString());
+                for (var left = reader.ReadInt32(); left > 0; left--)
                 {
-                    case PacketType.HeroState:
-                        HeroPackets++;
-                        var hero = HeroStateData.Read(reader);
-                        coop.Remote?.ApplyState(hero);
-                        Life.OnPeerState(hero.Down);
-                        break;
-
-                    case PacketType.MobStates when LevelsMatch:
-                        ApplyMobs(reader);
-                        break;
-
-                    case PacketType.MobDied when LevelsMatch:
-                        ApplyMobDeath(reader.ReadUInt16(), reader.ReadBoolean());
-                        break;
-
-                    case PacketType.MobAnim when LevelsMatch:
-                        ApplyAnim(reader.ReadUInt16(), reader.ReadString());
-                        break;
-
-                    case PacketType.HitHero:
-                        ApplyHit(reader.ReadInt32());
-                        break;
-
-                    case PacketType.ExitWait:
-                        Gathering.OnPeerDoor(reader);
-                        break;
-
-                    case PacketType.ExitGo:
-                        Gathering.OnProposal(reader);
-                        break;
-
-                    case PacketType.ExitAccept:
-                        Gathering.OnAccepted();
-                        break;
-
-                    case PacketType.Rescue:
-                        Life.OnRescued();
-                        break;
-
-                    case PacketType.TeamWipe:
-                        Life.OnWipe();
-                        break;
-
-                    case PacketType.ItemTaken:
-                        Items.OnTaken(reader);
-                        break;
-
-                    case PacketType.ItemPlaced:
-                        Items.OnPlaced(reader);
-                        break;
-
-                    case PacketType.LoadoutSaved:
-                        savedLoadoutOwner = reader.ReadUInt64();
-                        savedLoadout = reader.ReadBytes((int)(reader.BaseStream.Length - reader.BaseStream.Position));
-                        break;
-
-                    case PacketType.LevelContents:
-                        OnContents(reader);
-                        break;
+                    peer.Levels[reader.ReadByte()] = reader.ReadString();
                 }
+                log.Information("RINGO player {p} level {l} room {r} {id} signature {s:x}, match={m}",
+                    slot, number, peerRoom, peer.Arrival.Value.Id, peer.Signatures[(number, peerRoom)], Matches(peer));
+                // Deaths name mobs by their place in the list, which must be the same list.
+                if (number == levelNumber && peerRoom == room && Matches(peer))
+                {
+                    ReplayLevel();
+                }
+                return;
+            }
+            if (number != levelNumber || peerRoom != room)
+            {
+                return;
+            }
+            switch (type)
+            {
+                case PacketType.HeroState:
+                    HeroPackets++;
+                    var hero = HeroStateData.Read(reader);
+                    coop.Remotes.GetValueOrDefault(slot)?.ApplyState(hero);
+                    Life.OnPeerState(slot, hero.Down);
+                    break;
+
+                case PacketType.MobStates when fromHost && LevelsMatch:
+                    ApplyMobs(reader);
+                    break;
+
+                case PacketType.MobDied when fromHost && LevelsMatch:
+                    ApplyMobDeath(reader.ReadUInt16(), reader.ReadBoolean());
+                    break;
+
+                case PacketType.MobAnim when fromHost && LevelsMatch:
+                    ApplyAnim(reader.ReadUInt16(), reader.ReadString());
+                    break;
+
+                case PacketType.HitHero when fromHost:
+                    ApplyHit(reader.ReadInt32());
+                    break;
+
+                case PacketType.ExitWait:
+                    Gathering.OnPeerDoor(slot, reader);
+                    break;
+
+                case PacketType.ExitGo when fromHost:
+                    Gathering.OnProposal(reader);
+                    break;
+
+                case PacketType.ExitAccept when Role == NetRole.Host:
+                    Gathering.OnAccepted();
+                    break;
+
+                case PacketType.Rescue:
+                    Life.OnRescued(reader.ReadByte());
+                    break;
+
+                case PacketType.TeamWipe:
+                    Life.OnWipe();
+                    break;
+
+                case PacketType.ItemTaken:
+                    Items.OnTaken(reader);
+                    break;
+
+                case PacketType.ItemPlaced:
+                    Items.OnPlaced(reader);
+                    break;
+
+                case PacketType.LoadoutSaved:
+                    var owner = reader.ReadUInt64();
+                    savedLoadouts[owner] = reader.ReadBytes((int)(reader.BaseStream.Length - reader.BaseStream.Position));
+                    break;
+
+                case PacketType.LevelContents when fromHost:
+                    OnContents(reader);
+                    break;
             }
         }
 
@@ -1181,13 +1502,13 @@ namespace RingoMP.Net
             }
         }
 
-        /// The host saw a mob hit the client's hero here; the client owns that hero's life.
-        void OnRemoteHit(int damage)
+        /// The host saw a mob hit another player's hero here; that player owns its life.
+        void OnRemoteHit(int slot, int damage)
         {
             if (Role == NetRole.Host)
             {
                 HitsSent++;
-                SendForLevel(PacketType.HitHero, w => w.Write(damage));
+                transport.Send(slot, LevelPacket(PacketType.HitHero, w => w.Write(damage)), true);
             }
         }
     }

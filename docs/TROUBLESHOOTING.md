@@ -4,7 +4,7 @@
 
 ## Before anything else
 
-- Both players need **the same version** of RingoMP. A different version may connect and then fall out of step.
+- Every player needs **the same version** of RingoMP. A different version may connect and then fall out of step.
 - The newest log is in `Dead Cells\coremod\logs`. Lines from this mod start with `RINGO`. Please attach that file to any [issue](https://github.com/Ringophilia/Ringo-DeadCell-MP/issues) you open.
 
 ## The game closes right after starting
@@ -29,13 +29,13 @@
 ## We are in the same room but never connect
 
 - The link goes through Steam, with Steam's relays when a direct connection fails, so no ports need to be opened.
-- The room shows "Connecting to the host..." until the link is up. If it stays there for more than a minute, both players should leave the room and the owner should create a new one.
+- The room shows "Connecting to the host..." until the link is up. If it stays there for more than a minute, everyone should leave the room and the owner should create a new one.
 - A VPN or a strict firewall that blocks Steam's networking can stop the link. Try without the VPN.
 
 ## Pressing S or C does nothing
 
 - Only the room's owner starts runs, and only at the title screen.
-- Right after joining, both games exchange their progress first. The message "Still syncing with your partner" goes away after a moment.
+- Right after joining, the games exchange their progress first. The message "Still syncing with your partner" goes away after a moment.
 
 ## My friend joined and is walking through levels on their own
 

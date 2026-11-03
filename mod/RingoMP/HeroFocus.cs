@@ -85,13 +85,13 @@ namespace RingoMP
         void Run(Mob mob, Action body)
         {
             var game = dc.pr.Game.Class.ME;
-            if (Disabled || session.Remote is not { } remote || game == null || !ReferenceEquals(remote._level, mob._level))
+            if (Disabled || game == null || !session.Remotes.Values.Any(r => ReferenceEquals(r._level, mob._level)))
             {
                 body();
                 return;
             }
             var saved = game.hero;
-            game.hero = Choose(mob, saved, remote);
+            game.hero = Choose(mob, saved);
             try
             {
                 body();
@@ -104,13 +104,21 @@ namespace RingoMP
 
         /// The nearest standing hero, held for a moment so a mob does not flicker
         /// between two players standing at the same distance.
-        Hero Choose(Mob mob, Hero main, RemoteHero remote)
+        Hero Choose(Mob mob, Hero main)
         {
             var choice = choices.GetOrCreateValue(mob);
             var now = Environment.TickCount64;
-            if (choice.Hero == null || now >= choice.Until)
+            if (choice.Hero == null || now >= choice.Until || choice.Hero.destroyed)
             {
-                choice.Hero = remote.Downed || Distance(mob, main) <= Distance(mob, remote) ? main : remote;
+                Hero best = main;
+                foreach (var remote in session.Remotes.Values)
+                {
+                    if (!remote.Downed && !remote.Away && ReferenceEquals(remote._level, mob._level) && Distance(mob, remote) < Distance(mob, best))
+                    {
+                        best = remote;
+                    }
+                }
+                choice.Hero = best;
                 choice.Until = now + ReconsiderMs;
             }
             return choice.Hero;

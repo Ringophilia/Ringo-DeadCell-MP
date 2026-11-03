@@ -5,26 +5,36 @@ using Serilog;
 
 namespace RingoMP.Net
 {
-    /// Who the partner is and what they wear: their name above their hero, and
-    /// their outfit on it, when this player's game has that outfit too.
+    /// Who the other players are and what they wear: their names above their heroes,
+    /// and their outfits on them, when this player's game has those outfits too.
     public sealed class PartnerLook
     {
         const string NoName = "Player";
 
+        sealed class Worn
+        {
+            public string Name = "";
+            public string Skin = "";
+            public string Head = "";
+            public RemoteHero? Dressed;
+        }
+
         readonly ILogger log;
+        readonly SortedDictionary<int, Worn> peers = [];
         string? toldName;
         string? toldSkin;
         string? toldHead;
-        string? name;
-        string? skin;
-        string? head;
-        RemoteHero? dressed;
 
         public PartnerLook(ILogger log) => this.log = log;
 
-        public string? PartnerName => name;
+        /// The first other player's name, for what only ever has one partner.
+        public string? PartnerName => peers.Values.FirstOrDefault()?.Name;
 
-        /// The partner may have missed what was said before.
+        public string? NameOf(int slot) => peers.GetValueOrDefault(slot)?.Name;
+
+        public void ForgetPeer(int slot) => peers.Remove(slot);
+
+        /// The others may have missed what was said before.
         public void NewLink()
         {
             toldName = null;
@@ -56,35 +66,33 @@ namespace RingoMP.Net
             }));
         }
 
-        public void OnLook(BinaryReader reader)
+        public void OnLook(int slot, BinaryReader reader)
         {
-            name = reader.ReadString();
-            skin = reader.ReadString();
-            head = reader.ReadString();
-            dressed = null;
-            log.Information("RINGO partner wears {s} with {h}", skin, head);
+            var worn = new Worn { Name = reader.ReadString(), Skin = reader.ReadString(), Head = reader.ReadString() };
+            peers[slot] = worn;
+            log.Information("RINGO player {p} wears {s} with {h}", slot, worn.Skin, worn.Head);
         }
 
-        public void Update(RemoteHero? remote)
+        public void Update(RemoteHero remote)
         {
-            if (remote?._level == null)
+            if (remote._level == null || !peers.TryGetValue(remote.Slot, out var worn))
             {
                 return;
             }
             // The label goes with the hero's graphics, which a new level builds again.
-            if (name != null && remote.gameplayLabel?.parent == null)
+            if (remote.gameplayLabel?.parent == null)
             {
-                remote.setGameplayLabel(Translations.Drawable(name).AsHaxeString(), Ref<int>.Null);
+                remote.setGameplayLabel(Translations.Drawable(worn.Name).AsHaxeString(), Ref<int>.Null);
             }
-            if (!ReferenceEquals(dressed, remote) && skin != null)
+            if (!ReferenceEquals(worn.Dressed, remote))
             {
-                dressed = remote;
-                Dress(remote);
+                worn.Dressed = remote;
+                Dress(remote, worn.Skin, worn.Head);
             }
         }
 
         /// What this player has not unlocked may need assets this game lacks.
-        void Dress(RemoteHero remote)
+        void Dress(RemoteHero remote, string skin, string head)
         {
             var meta = Game.Class.ME?.user?.itemMeta;
             if (meta == null)
